@@ -1,0 +1,42 @@
+[committed.fw2]
+path = "tests/pdfs/fw2.pdf"
+
+[committed.edge_incremental_update_objstm]
+path = "tests/pdfs/edge/edge_incremental_update_objstm.pdf"
+
+[committed.edge_encrypted_empty_password]
+path = "tests/pdfs/edge/edge_encrypted_empty_password.pdf"
+password = ""
+
+[scenarios.search_cached]
+dataset = "fw2"
+x_frac = 0.15
+y_frac = 0.12
+w_frac = 0.32
+h_frac = 0.18
+overlap = 0.0
+
+[scenarios.search_mixed]
+dataset = "fw2"
+iterations = 500
+x_mul = 37
+y_mul = 53
+w_mul = 17
+h_mul = 29
+w_base = 0.08
+w_mod = 30
+h_base = 0.03
+h_mod = 20
+overlap_mod = 3
+overlap_alt = 0.2
+
+[scenarios.search_regex_cached]
+dataset = "fw2"
+pattern = "Attention:"
+
+[scenarios.scoped_merge_rules]
+dataset = "fw2"
+overlap = 1.0
+merge_threshold = 2.0
+normalize = false
+iterations = 120

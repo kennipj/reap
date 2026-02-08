@@ -1,0 +1,84 @@
+%PDF-1.4
+%‚„œ”
+1 0 obj
+<< << >> /Length 342 >>
+stream
+/CIDInit /ProcSet findresource begin
+12 dict begin
+begincmap
+/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def
+/CMapName /Synthetic-UCS def
+/CMapType 2 def
+1 begincodespacerange
+<0000> <00FF>
+endcodespacerange
+1 beginbfrange
+<0000> <00FF> <0020>
+endbfrange
+endcmap
+CMapName currentdict /CMap defineresource pop
+end
+end
+
+endstream
+endobj
+2 0 obj
+<< /Type /Font /Subtype /CIDFontType2 /BaseFont /CIDDummy /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /DW 1000 /W [0 [500.0 510.5 520.0 530.0]] >>
+endobj
+3 0 obj
+<< /Type /Font /Subtype /Type0 /BaseFont /CIDDummy /Encoding /Identity-H /DescendantFonts [2 0 R] /ToUnicode 1 0 R >>
+endobj
+4 0 obj
+<< /FunctionType 2 /Domain [0 1] /C0 [0 0 0 0] /C1 [1 0.5 0 0] /N 1 >>
+endobj
+5 0 obj
+[ /Separation /SpotBlue /DeviceCMYK 4 0 R ]
+endobj
+6 0 obj
+<< /Type /Catalog /Pages 7 0 R >>
+endobj
+7 0 obj
+<< /Type /Pages /Kids [8 0 R] /Count 1 >>
+endobj
+8 0 obj
+<< /Type /Page /Parent 7 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 10 0 R /F2 3 0 R >> /ColorSpace << /CS1 5 0 R >> >> /Contents 9 0 R >>
+endobj
+9 0 obj
+<<  /Length 396 >>
+stream
+/CS1 cs 0.8 scn
+BT /F1 10.00 Tf 1 0 0 1 54.00 700.00 Tm (COLOR-MARKER) Tj ET
+0 0 0 rg
+0.000 0.000 0.000 rg
+BT /F1 10.00 Tf 1 0 0 1 54.00 672.00 Tm (Employee's) Tj ET
+0.000 0.000 0.000 rg
+BT /F1 10.00 Tf 1 0 0 1 142.00 672.00 Tm (social) Tj ET
+0.000 0.000 0.000 rg
+BT /F1 10.00 Tf 1 0 0 1 202.00 672.00 Tm (security) Tj ET
+0.000 0.000 0.000 rg
+BT /F1 10.00 Tf 1 0 0 1 275.00 672.00 Tm (no.) Tj ET
+
+endstream
+endobj
+10 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+xref
+0 11
+0000000000 65535 f 
+0000000015 00000 n 
+0000000414 00000 n 
+0000000606 00000 n 
+0000000739 00000 n 
+0000000825 00000 n 
+0000000884 00000 n 
+0000000933 00000 n 
+0000000990 00000 n 
+0000001156 00000 n 
+0000001604 00000 n 
+trailer
+<< /Size 11 /Root 6 0 R >>
+startxref
+0
+%%EOF
+%CORRUPT_STARTXREF_SYNTHETIC

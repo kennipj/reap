@@ -1,0 +1,49 @@
+[package]
+name = "reap"
+version = "0.1.0"
+edition = "2024"
+description = "Rust-first PDF text extraction with geometry-aware search and optional Python bindings"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/kennipj/reap"
+homepage = "https://github.com/kennipj/reap"
+keywords = ["pdf", "text-extraction", "search", "pyo3"]
+categories = ["text-processing", "parsing"]
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+flate2 = "1.0"
+ttf-parser = "0.20"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+regex = "1"
+memchr = "2"
+md-5 = "0.10"
+rc4 = "0.1"
+aes = "0.8"
+cbc = "0.1"
+cipher = "0.4"
+pyo3 = { version = "0.28.2", features = ["extension-module"], optional = true }
+pprof = { version = "0.14", features = ["criterion", "flamegraph"], optional = true }
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+sha2 = "0.10"
+toml = "0.8"
+
+[features]
+default = []
+pyo3 = ["dep:pyo3"]
+bench-profiler = ["dep:pprof"]
+
+[[bench]]
+path = "benchmark/criterion_core.rs"
+name = "criterion_core"
+harness = false
+
+[[bench]]
+path = "benchmark/flamegraph.rs"
+name = "flamegraph"
+harness = false

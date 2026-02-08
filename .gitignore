@@ -1,0 +1,8 @@
+/target
+.DS_STORE
+.venv
+.vscode
+*.so
+*.pyc
+/python/performance_testing
+/scripts

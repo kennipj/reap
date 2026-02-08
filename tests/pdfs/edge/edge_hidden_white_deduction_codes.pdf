@@ -1,0 +1,59 @@
+%PDF-1.4
+%‚„œ”
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>
+endobj
+4 0 obj
+<<  /Length 914 >>
+stream
+0.120 0.120 0.120 rg
+40 690 520 30 re f
+1.000 1.000 1.000 rg
+BT /F1 10.00 Tf 1 0 0 1 48.00 700.00 Tm (Emp) Tj ET
+1.000 1.000 1.000 rg
+BT /F1 10.00 Tf 1 0 0 1 126.00 700.00 Tm (No) Tj ET
+1.000 1.000 1.000 rg
+BT /F1 10.00 Tf 1 0 0 1 204.00 700.00 Tm (Employee) Tj ET
+1.000 1.000 1.000 rg
+BT /F1 10.00 Tf 1 0 0 1 282.00 700.00 Tm (Name) Tj ET
+1 1 1 rg
+40 600 520 58 re f
+1.000 1.000 1.000 rg
+BT /F1 10.00 Tf 1 0 0 1 52.00 635.00 Tm (1100MEDICARE) Tj ET
+1.000 1.000 1.000 rg
+BT /F1 10.00 Tf 1 0 0 1 208.00 635.00 Tm (2000HLTH) Tj ET
+1.000 1.000 1.000 rg
+BT /F1 10.00 Tf 1 0 0 1 330.00 635.00 Tm (2010DENTAL) Tj ET
+0.000 0.000 0.000 rg
+BT /F1 10.00 Tf 1 0 0 1 52.00 615.00 Tm (MEDICARE) Tj ET
+0.000 0.000 0.000 rg
+BT /F1 10.00 Tf 1 0 0 1 148.00 615.00 Tm (HLTH) Tj ET
+0.000 0.000 0.000 rg
+BT /F1 10.00 Tf 1 0 0 1 244.00 615.00 Tm (PPO) Tj ET
+0.000 0.000 0.000 rg
+BT /F1 10.00 Tf 1 0 0 1 340.00 615.00 Tm (DENTAL) Tj ET
+
+endstream
+endobj
+5 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+xref
+0 6
+0000000000 65535 f 
+0000000015 00000 n 
+0000000064 00000 n 
+0000000121 00000 n 
+0000000247 00000 n 
+0000001213 00000 n 
+trailer
+<< /Size 6 /Root 1 0 R >>
+startxref
+1283
+%%EOF

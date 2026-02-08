@@ -1,0 +1,75 @@
+{
+  "platform": "macos-aarch64",
+  "metrics": [
+    {
+      "scenario_id": "parse",
+      "dataset_id": "fw2",
+      "stat": "median_ms",
+      "metric_ms": 6.421354000000001,
+      "threshold_class": "core"
+    },
+    {
+      "scenario_id": "parse",
+      "dataset_id": "edge_incremental_update_objstm",
+      "stat": "median_ms",
+      "metric_ms": 0.0277705,
+      "threshold_class": "core"
+    },
+    {
+      "scenario_id": "extract_blocks",
+      "dataset_id": "fw2",
+      "stat": "median_ms",
+      "metric_ms": 3.3445419999999997,
+      "threshold_class": "core"
+    },
+    {
+      "scenario_id": "extract_blocks",
+      "dataset_id": "edge_incremental_update_objstm",
+      "stat": "median_ms",
+      "metric_ms": 0.040417,
+      "threshold_class": "core"
+    },
+    {
+      "scenario_id": "index_build",
+      "dataset_id": "fw2",
+      "stat": "median_ms",
+      "metric_ms": 0.481833,
+      "threshold_class": "core"
+    },
+    {
+      "scenario_id": "search_cached",
+      "dataset_id": "fw2",
+      "stat": "median_ms",
+      "metric_ms": 0.003125,
+      "threshold_class": "cached"
+    },
+    {
+      "scenario_id": "search_mixed",
+      "dataset_id": "fw2",
+      "stat": "p95_ms",
+      "metric_ms": 0.019917,
+      "threshold_class": "mixed_scoped_encryption"
+    },
+    {
+      "scenario_id": "search_regex_cached",
+      "dataset_id": "fw2",
+      "stat": "median_ms",
+      "metric_ms": 0.000083,
+      "threshold_class": "cached"
+    },
+    {
+      "scenario_id": "scoped_merge_rules",
+      "dataset_id": "fw2",
+      "stat": "median_ms",
+      "metric_ms": 1.6580835,
+      "threshold_class": "mixed_scoped_encryption"
+    },
+    {
+      "scenario_id": "parse_encrypted_empty_password",
+      "dataset_id": "edge_encrypted_empty_password",
+      "stat": "median_ms",
+      "metric_ms": 0.040354,
+      "threshold_class": "mixed_scoped_encryption"
+    }
+  ]
+}

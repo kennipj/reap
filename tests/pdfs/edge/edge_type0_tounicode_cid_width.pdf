@@ -1,0 +1,66 @@
+%PDF-1.4
+%‚„œ”
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F0 4 0 R >> >> /Contents 5 0 R >>
+endobj
+4 0 obj
+<< /Type /Font /Subtype /Type0 /BaseFont /SyntheticCID /Encoding /Identity-H /DescendantFonts [6 0 R] /ToUnicode 7 0 R >>
+endobj
+5 0 obj
+<<  /Length 678 >>
+stream
+BT /F0 9 Tf 40 730 Td <0044006900730063006C00610069006D0065007200200069006E0066006F0072006D006100740069006F006E> Tj ET
+BT /F0 9 Tf 40 702 Td <0046006F0072006D00200057002D00320020005700610067006500200061006E00640020005400610078002000530074006100740065006D0065006E0074> Tj ET
+BT /F0 9 Tf 40 674 Td <0050006C00650061007300650020006B0065006500700020007400680069007300200057002D00320020006F007200200073007500620073007400690074007500740065002000730074006100740065006D0065006E0074002E> Tj ET
+BT /F0 9 Tf 40 646 Td <0054006100780020007400690070002000730075006D006D006100720079> Tj ET
+BT /F0 9 Tf 40 618 Td <004600650064006500720061006C00200069006E0063006F006D00650020007400610078> Tj ET
+endstream
+endobj
+6 0 obj
+<< /Type /Font /Subtype /CIDFontType2 /BaseFont /SyntheticCID /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /FontDescriptor 8 0 R /DW 1000 /W [32 126 500.5] >>
+endobj
+7 0 obj
+<<  /Length 343 >>
+stream
+/CIDInit /ProcSet findresource begin
+12 dict begin
+begincmap
+/CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> def
+/CMapName /Identity-H def
+/CMapType 2 def
+1 begincodespacerange
+<0000> <00FF>
+endcodespacerange
+1 beginbfrange
+<0020> <007E> <0020>
+endbfrange
+endcmap
+CMapName currentdict /CMap defineresource pop
+end
+end
+endstream
+endobj
+8 0 obj
+<< /Type /FontDescriptor /FontName /SyntheticCID /Ascent 880 /Descent -220 /CapHeight 700 /Flags 4 /ItalicAngle 0 /StemV 80 >>
+endobj
+xref
+0 9
+0000000000 65535 f 
+0000000015 00000 n 
+0000000064 00000 n 
+0000000121 00000 n 
+0000000247 00000 n 
+0000000384 00000 n 
+0000001114 00000 n 
+0000001317 00000 n 
+0000001712 00000 n 
+trailer << /Size 9 /Root 1 0 R >>
+startxref
+1854
+%%EOF

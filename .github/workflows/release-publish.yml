@@ -1,0 +1,203 @@
+name: Release Python
+
+on:
+  release:
+    types: [published]
+
+env:
+  EXPECTED_WHEEL_COUNT: "15"
+
+permissions:
+  contents: read
+
+jobs:
+  validate-release:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.validate.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Validate release metadata
+        id: validate
+        run: python release/validate.py --tag "${{ github.event.release.tag_name }}"
+
+  build-sdist:
+    needs: validate-release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install maturin
+        run: python -m pip install --upgrade pip maturin
+
+      - name: Build sdist
+        run: maturin sdist --out dist
+
+      - name: Upload sdist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  build-wheels:
+    needs: validate-release
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-14]
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve build target
+        id: target
+        shell: bash
+        run: |
+          case "${{ matrix.os }}" in
+            ubuntu-latest)
+              echo "target=x86_64-unknown-linux-gnu" >> "$GITHUB_OUTPUT"
+              echo "platform=linux-x86_64" >> "$GITHUB_OUTPUT"
+              echo "rust_targets=x86_64-unknown-linux-gnu" >> "$GITHUB_OUTPUT"
+              ;;
+            ubuntu-24.04-arm)
+              echo "target=aarch64-unknown-linux-gnu" >> "$GITHUB_OUTPUT"
+              echo "platform=linux-aarch64" >> "$GITHUB_OUTPUT"
+              echo "rust_targets=aarch64-unknown-linux-gnu" >> "$GITHUB_OUTPUT"
+              ;;
+            macos-14)
+              echo "target=universal2-apple-darwin" >> "$GITHUB_OUTPUT"
+              echo "platform=macos-universal2" >> "$GITHUB_OUTPUT"
+              echo "rust_targets=x86_64-apple-darwin aarch64-apple-darwin" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "Unsupported runner: ${{ matrix.os }}" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Add Rust targets
+        run: rustup target add ${{ steps.target.outputs.rust_targets }}
+
+      - name: Install maturin
+        run: python -m pip install --upgrade pip maturin
+
+      - name: Build wheel
+        run: maturin build --release --features pyo3 --target ${{ steps.target.outputs.target }} --out dist -i python${{ matrix.python-version }}
+
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ steps.target.outputs.platform }}-py${{ matrix.python-version }}
+          path: dist/*.whl
+          if-no-files-found: error
+
+  publish-pypi:
+    needs: [build-sdist, build-wheels]
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Download wheel artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          merge-multiple: true
+          path: dist
+
+      - name: Download sdist artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: sdist
+          path: dist
+
+      - name: Ensure at least one wheel was built
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          wheels=(dist/*.whl)
+          if [ "${#wheels[@]}" -eq 0 ]; then
+            echo "No wheels were downloaded; refusing to publish." >&2
+            exit 1
+          fi
+          if [ "${#wheels[@]}" -ne "${EXPECTED_WHEEL_COUNT}" ]; then
+            echo "Expected ${EXPECTED_WHEEL_COUNT} wheels, found ${#wheels[@]}." >&2
+            exit 1
+          fi
+
+      - name: Publish to PyPI (OIDC)
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
+
+  attach-release-assets:
+    needs: [build-sdist, build-wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download wheel artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          merge-multiple: true
+          path: dist
+
+      - name: Download sdist artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: sdist
+          path: dist
+
+      - name: Ensure at least one wheel was built
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          wheels=(dist/*.whl)
+          if [ "${#wheels[@]}" -eq 0 ]; then
+            echo "No wheels were downloaded; refusing to upload release assets." >&2
+            exit 1
+          fi
+          if [ "${#wheels[@]}" -ne "${EXPECTED_WHEEL_COUNT}" ]; then
+            echo "Expected ${EXPECTED_WHEEL_COUNT} wheels, found ${#wheels[@]}." >&2
+            exit 1
+          fi
+
+      - name: Upload assets to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.event.release.tag_name }}" dist/* --clobber

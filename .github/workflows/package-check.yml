@@ -1,0 +1,87 @@
+name: Package Check
+
+on:
+  pull_request:
+  push:
+
+jobs:
+  validate-metadata:
+    if: github.event_name != 'push' || github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Validate packaging metadata
+        run: python release/validate.py
+
+  crate-dry-run:
+    if: github.event_name != 'push' || github.ref_name == github.event.repository.default_branch
+    needs: validate-metadata
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Crate packaging dry run
+        run: cargo package --no-verify
+
+  python-package-dry-run:
+    if: github.event_name != 'push' || github.ref_name == github.event.repository.default_branch
+    needs: validate-metadata
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-14]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve build target
+        id: target
+        shell: bash
+        run: |
+          case "${{ matrix.os }}" in
+            ubuntu-latest)
+              echo "target=x86_64-unknown-linux-gnu" >> "$GITHUB_OUTPUT"
+              echo "rust_targets=x86_64-unknown-linux-gnu" >> "$GITHUB_OUTPUT"
+              ;;
+            ubuntu-24.04-arm)
+              echo "target=aarch64-unknown-linux-gnu" >> "$GITHUB_OUTPUT"
+              echo "rust_targets=aarch64-unknown-linux-gnu" >> "$GITHUB_OUTPUT"
+              ;;
+            macos-14)
+              echo "target=universal2-apple-darwin" >> "$GITHUB_OUTPUT"
+              echo "rust_targets=x86_64-apple-darwin aarch64-apple-darwin" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "Unsupported runner: ${{ matrix.os }}" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Add Rust targets
+        run: rustup target add ${{ steps.target.outputs.rust_targets }}
+
+      - name: Install maturin
+        run: python -m pip install --upgrade pip maturin
+
+      - name: Build wheel and sdist
+        run: maturin build --release --features pyo3 --target ${{ steps.target.outputs.target }} --sdist --out dist -i python3.14
