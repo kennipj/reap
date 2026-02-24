@@ -1,6 +1,6 @@
 [package]
 name = "reap"
-version = "0.1.0"
+version = "0.1.2"
 edition = "2024"
 description = "Rust-first PDF text extraction with geometry-aware search and optional Python bindings"
 license = "MIT"
