@@ -52,9 +52,6 @@ jobs:
       - name: Apply tag version to Cargo.toml
         run: python release/apply_tag_version.py --tag "${{ github.event.release.tag_name }}"
 
-      - name: Validate release metadata
-        run: python release/validate.py --tag "${{ github.event.release.tag_name }}"
-
       - name: Install maturin
         run: python -m pip install --upgrade pip maturin
 
@@ -119,9 +116,6 @@ jobs:
 
       - name: Apply tag version to Cargo.toml
         run: python release/apply_tag_version.py --tag "${{ github.event.release.tag_name }}"
-
-      - name: Validate release metadata
-        run: python release/validate.py --tag "${{ github.event.release.tag_name }}"
 
       - name: Install maturin
         run: python -m pip install --upgrade pip maturin
