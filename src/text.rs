@@ -438,7 +438,7 @@ fn flush_current_text_block(
     if cur_text.is_empty() {
         return;
     }
-    if is_discardable_underscore_block(cur_text) {
+    if is_discardable_block(cur_text) {
         cur_text.clear();
         *cur_page = None;
         *cur_bbox = None;
@@ -462,8 +462,8 @@ fn flush_current_text_block(
     }
 }
 
-fn is_discardable_underscore_block(text: &str) -> bool {
-    !text.is_empty() && text.chars().all(|ch| ch == '_')
+fn is_discardable_block(text: &str) -> bool {
+    !text.is_empty() && text.chars().all(|ch| ch == '_' || ch == '-')
 }
 
 const WORD_POS_GAP_HEIGHT_RATIO: f64 = 0.10;
@@ -4288,5 +4288,16 @@ mod tests {
         )
         .expect("decoded stream");
         assert_eq!(decoded, raw);
+    }
+
+    #[test]
+    fn discardable_noise_blocks_include_hyphen_only() {
+        assert!(is_discardable_block("_"));
+        assert!(is_discardable_block("_____"));
+        assert!(is_discardable_block("-"));
+        assert!(is_discardable_block("------"));
+        assert!(is_discardable_block("_-_-"));
+        assert!(!is_discardable_block("A-"));
+        assert!(!is_discardable_block("A_B"));
     }
 }

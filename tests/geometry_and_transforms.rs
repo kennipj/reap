@@ -318,7 +318,10 @@ fn cid_widths_are_not_near_zero() {
     );
 
     let words = extract_text_blocks(&doc);
-    assert!(!words.is_empty(), "expected extracted words for CID width fixture");
+    assert!(
+        !words.is_empty(),
+        "expected extracted words for CID width fixture"
+    );
 
     for token in ["Employee's", "Employer"] {
         let hit = words
