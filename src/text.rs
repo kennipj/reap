@@ -2304,30 +2304,11 @@ fn build_font_map(doc: &PdfDoc, resources: Option<&Object>) -> HashMap<String, F
     out
 }
 
-fn decode_contents(_doc: &PdfDoc, contents: &[&Object]) -> Vec<u8> {
+fn decode_contents(doc: &PdfDoc, contents: &[&Object]) -> Vec<u8> {
     let mut out = Vec::new();
     for content in contents {
-        if let Object::Stream { dict, data } = content {
-            if let Some(filter) = dict.get("Filter") {
-                if let Some(name) = filter.as_name() {
-                    if name == "FlateDecode" {
-                        let decoded = flate_decode(data);
-                        out.extend_from_slice(&decoded);
-                        out.push(b'\n');
-                        continue;
-                    }
-                } else if let Some(arr) = filter.as_array() {
-                    if let Some(Object::Name(name)) = arr.get(0) {
-                        if name == "FlateDecode" {
-                            let decoded = flate_decode(data);
-                            out.extend_from_slice(&decoded);
-                            out.push(b'\n');
-                            continue;
-                        }
-                    }
-                }
-            }
-            out.extend_from_slice(data);
+        if let Some(decoded) = decode_stream(doc, content) {
+            out.extend_from_slice(&decoded);
             out.push(b'\n');
         }
     }
@@ -2683,23 +2664,54 @@ fn system_font_candidates(base_font: &str) -> Vec<&'static str> {
 fn decode_stream(doc: &PdfDoc, obj: &Object) -> Option<Vec<u8>> {
     match doc.resolve(obj) {
         Object::Stream { dict, data } => {
-            if let Some(filter) = dict.get("Filter") {
-                if let Some(name) = filter.as_name() {
-                    if name == "FlateDecode" {
-                        return Some(flate_decode(data));
-                    }
-                } else if let Some(arr) = filter.as_array() {
-                    if let Some(Object::Name(name)) = arr.get(0) {
-                        if name == "FlateDecode" {
-                            return Some(flate_decode(data));
-                        }
-                    }
-                }
+            if stream_uses_flate_filter(doc, dict) {
+                return Some(flate_decode(data));
             }
             Some(data.clone())
         }
         _ => None,
     }
+}
+
+const STREAM_REF_RESOLVE_MAX_DEPTH: usize = 8;
+
+fn stream_uses_flate_filter(doc: &PdfDoc, dict: &HashMap<String, Object>) -> bool {
+    let Some(filter) = dict.get("Filter") else {
+        return false;
+    };
+    let filter = resolve_object_reference_chain(doc, filter, STREAM_REF_RESOLVE_MAX_DEPTH);
+    match filter {
+        Object::Name(name) => name == "FlateDecode",
+        Object::Array(items) => match items.first() {
+            Some(first) => {
+                let first =
+                    resolve_object_reference_chain(doc, first, STREAM_REF_RESOLVE_MAX_DEPTH);
+                matches!(first, Object::Name(name) if name == "FlateDecode")
+            }
+            None => false,
+        },
+        _ => false,
+    }
+}
+
+fn resolve_object_reference_chain<'a>(
+    doc: &'a PdfDoc,
+    mut obj: &'a Object,
+    max_depth: usize,
+) -> &'a Object {
+    for _ in 0..max_depth {
+        match obj {
+            Object::Reference { .. } => {
+                let resolved = doc.resolve(obj);
+                if std::ptr::eq(resolved, obj) {
+                    break;
+                }
+                obj = resolved;
+            }
+            _ => break,
+        }
+    }
+    obj
 }
 
 fn base14_metrics(name: &str) -> Option<FontMetrics> {
@@ -4006,6 +4018,7 @@ impl<'a> ContentTokenizer<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
 
     #[test]
     fn canonical_base14_aliases_resolve() {
@@ -4233,5 +4246,47 @@ mod tests {
             ops.push(op);
         }
         assert_eq!(ops, vec!["Q", "BT", "Tf", "Tj", "ET"]);
+    }
+
+    #[test]
+    fn decode_stream_resolves_indirect_flate_filter_reference() {
+        let raw = b"BT /F1 12 Tf (INDIRECT FILTER OK) Tj ET\n";
+        let mut encoder =
+            flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(raw).expect("compress test stream");
+        let compressed = encoder.finish().expect("finish compression");
+
+        let mut objects = HashMap::new();
+        objects.insert(
+            (1, 0),
+            Object::Stream {
+                dict: HashMap::from([(
+                    "Filter".to_string(),
+                    Object::Reference {
+                        obj_num: 2,
+                        gen_num: 0,
+                    },
+                )]),
+                data: compressed,
+            },
+        );
+        objects.insert(
+            (2, 0),
+            Object::Array(vec![Object::Name("FlateDecode".to_string())]),
+        );
+
+        let doc = PdfDoc {
+            objects,
+            trailer: None,
+        };
+        let decoded = decode_stream(
+            &doc,
+            &Object::Reference {
+                obj_num: 1,
+                gen_num: 0,
+            },
+        )
+        .expect("decoded stream");
+        assert_eq!(decoded, raw);
     }
 }

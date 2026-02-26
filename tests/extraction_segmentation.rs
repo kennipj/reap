@@ -2,6 +2,7 @@ mod common;
 
 use std::fs;
 
+use reap::model::Object;
 use reap::rtree::{RegexSearchError, ScopedMergeRules, TextBlockIndex};
 use reap::text::{Rectangle, TextBlock, extract_text_blocks};
 
@@ -245,7 +246,9 @@ fn separation_colorspace_text_remains_visible() {
     let fixture = edge_pdf("edge_separation_type0_corrupt_xref.pdf");
     let bytes = fs::read(&fixture).expect("failed to read separation fixture");
     assert!(
-        bytes.windows(b"/Separation".len()).any(|w| w == b"/Separation"),
+        bytes
+            .windows(b"/Separation".len())
+            .any(|w| w == b"/Separation"),
         "expected /Separation colorspace marker in fixture bytes"
     );
 
@@ -315,6 +318,44 @@ fn inline_image_payload_does_not_block_text_extraction() {
         "expected substantial page-0 text extraction in inline-image continuation fixture, got {} blocks",
         page0_count
     );
+}
+
+#[test]
+fn contents_stream_with_indirect_filter_extracts_text() {
+    let fixture = edge_pdf("edge_contents_indirect_filter_flate.pdf");
+    let bytes = fs::read(&fixture).expect("failed to read indirect-filter fixture");
+    assert!(
+        bytes.windows(b"/Filter ".len()).any(|w| w == b"/Filter ")
+            && bytes.windows(b" 0 R".len()).any(|w| w == b" 0 R")
+            && bytes
+                .windows(b"/FlateDecode".len())
+                .any(|w| w == b"/FlateDecode"),
+        "expected indirect /Filter reference and Flate marker in fixture bytes"
+    );
+
+    let doc = load_doc(&fixture);
+    let has_indirect_filter = doc.objects.values().any(|obj| match obj {
+        Object::Stream { dict, .. } => matches!(dict.get("Filter"), Some(Object::Reference { .. })),
+        _ => false,
+    });
+    assert!(
+        has_indirect_filter,
+        "expected at least one stream with indirect /Filter reference"
+    );
+
+    let blocks = extract_text_blocks(&doc);
+    assert!(
+        !blocks.is_empty(),
+        "expected non-empty extraction for indirect-filter content stream fixture"
+    );
+
+    for token in ["INDIRECT", "FILTER", "OK"] {
+        assert!(
+            blocks.iter().any(|b| b.page_index == 0 && b.text == token),
+            "expected token '{}' on page 0",
+            token
+        );
+    }
 }
 
 #[test]
@@ -412,7 +453,9 @@ fn inline_image_termination_corrupt_xref_regression() {
         "expected deterministic corrupted startxref marker in fixture bytes"
     );
     assert!(
-        bytes.windows(b"startxref\n0".len()).any(|w| w == b"startxref\n0"),
+        bytes
+            .windows(b"startxref\n0".len())
+            .any(|w| w == b"startxref\n0"),
         "expected malformed startxref offset in fixture bytes"
     );
 
