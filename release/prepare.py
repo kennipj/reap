@@ -8,11 +8,10 @@ import sys
 from pathlib import Path
 
 VERSION_PATTERN = re.compile(r"^\d+\.\d+\.\d+$")
-PACKAGE_VERSION_LINE = re.compile(r'^(\s*version\s*=\s*")([^"]+)(".*)$')
 
 
 def fail(message: str) -> None:
-    raise SystemExit(f"release prepare failed: {message}")
+    raise SystemExit(f"release preflight failed: {message}")
 
 
 def ensure_python_version() -> None:
@@ -22,9 +21,11 @@ def ensure_python_version() -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Prepare a new release by bumping Cargo version and running checks."
+        description=(
+            "Run non-mutating release preflight checks for a release tag (X.Y.Z)."
+        )
     )
-    parser.add_argument("version", help="new version (X.Y.Z)")
+    parser.add_argument("version", help="release tag/version (X.Y.Z)")
     parser.add_argument(
         "--repo-root",
         default=Path(__file__).resolve().parents[1],
@@ -47,47 +48,7 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         help="output directory for local sdist check (default: /tmp/reap-release-check)",
     )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="show what would change without writing files",
-    )
     return parser.parse_args()
-
-
-def update_cargo_version(
-    cargo_path: Path, target_version: str, dry_run: bool
-) -> tuple[str, bool]:
-    text = cargo_path.read_text(encoding="utf-8")
-    lines = text.splitlines(keepends=True)
-
-    in_package = False
-    found_version = False
-    current_version = None
-
-    for idx, line in enumerate(lines):
-        stripped = line.strip()
-        if stripped.startswith("[") and stripped.endswith("]"):
-            in_package = stripped == "[package]"
-            continue
-        if not in_package:
-            continue
-
-        match = PACKAGE_VERSION_LINE.match(line)
-        if match:
-            current_version = match.group(2)
-            lines[idx] = f"{match.group(1)}{target_version}{match.group(3)}\n"
-            found_version = True
-            break
-
-    if not found_version or current_version is None:
-        fail("could not find [package].version in Cargo.toml")
-
-    changed = current_version != target_version
-    if changed and not dry_run:
-        cargo_path.write_text("".join(lines), encoding="utf-8")
-
-    return current_version, changed
 
 
 def run_cmd(cmd: list[str], cwd: Path) -> None:
@@ -101,39 +62,42 @@ def main() -> int:
 
     version = args.version.strip()
     if not VERSION_PATTERN.fullmatch(version):
-        fail("version must match X.Y.Z")
+        fail("version must match X.Y.Z (no 'v' prefix)")
 
     repo_root = args.repo_root.resolve()
-    cargo_path = repo_root / "Cargo.toml"
+    apply_script = repo_root / "release" / "apply_tag_version.py"
     validator_path = repo_root / "release" / "validate.py"
 
-    if not cargo_path.exists():
-        fail(f"missing file: {cargo_path}")
+    if not apply_script.exists():
+        fail(f"missing file: {apply_script}")
     if not validator_path.exists():
         fail(f"missing file: {validator_path}")
 
-    current_version, changed = update_cargo_version(cargo_path, version, args.dry_run)
-    if changed:
-        if args.dry_run:
-            print(
-                f"dry-run: would update Cargo.toml version from {current_version} to {version}"
-            )
-        else:
-            print(f"updated Cargo.toml version: {current_version} -> {version}")
-    else:
-        print(f"Cargo.toml already at version {version}")
+    run_cmd(
+        [
+            sys.executable,
+            str(apply_script),
+            "--tag",
+            version,
+            "--repo-root",
+            str(repo_root),
+            "--dry-run",
+        ],
+        repo_root,
+    )
 
-    if args.dry_run and changed:
-        print(
-            "dry-run: skipping release/validate.py --tag check because Cargo.toml was not modified"
-        )
-    else:
-        run_cmd([sys.executable, str(validator_path), "--tag", version], repo_root)
+    run_cmd(
+        [
+            sys.executable,
+            str(validator_path),
+            "--repo-root",
+            str(repo_root),
+        ],
+        repo_root,
+    )
 
     if not args.skip_package_checks:
-        run_cmd(
-            ["cargo", "package", "--no-verify", "--allow-dirty"], repo_root
-        )
+        run_cmd(["cargo", "package", "--no-verify", "--allow-dirty"], repo_root)
         run_cmd(
             ["uv", "run", "maturin", "sdist", "--out", str(args.sdist_out)],
             repo_root,
@@ -144,9 +108,7 @@ def main() -> int:
 
     print("")
     print("next steps:")
-    print(f"  git add Cargo.toml")
-    print(f'  git commit -m "release: {version}"')
-    print("  git push")
+    print("  ensure package-check.yml is green on default branch")
     print(f"  create and publish GitHub Release tag {version}")
     print("  approve the publish-pypi job in environment 'pypi'")
 
