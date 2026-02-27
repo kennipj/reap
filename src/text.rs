@@ -463,7 +463,7 @@ fn flush_current_text_block(
 }
 
 fn is_discardable_block(text: &str) -> bool {
-    !text.is_empty() && text.chars().all(|ch| ch == '_' || ch == '-')
+    text.chars().count() >= 3 && text.chars().all(|ch| ch == '_' || ch == '-')
 }
 
 const WORD_POS_GAP_HEIGHT_RATIO: f64 = 0.10;
@@ -4292,9 +4292,12 @@ mod tests {
 
     #[test]
     fn discardable_noise_blocks_include_hyphen_only() {
-        assert!(is_discardable_block("_"));
+        assert!(!is_discardable_block("_"));
+        assert!(!is_discardable_block("__"));
         assert!(is_discardable_block("_____"));
-        assert!(is_discardable_block("-"));
+        assert!(!is_discardable_block("-"));
+        assert!(!is_discardable_block("--"));
+        assert!(is_discardable_block("---"));
         assert!(is_discardable_block("------"));
         assert!(is_discardable_block("_-_-"));
         assert!(!is_discardable_block("A-"));
