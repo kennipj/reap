@@ -8,7 +8,10 @@ use pyo3::types::{PyAny, PyList, PyModule, PyType};
 
 use crate::parser::{ParseError, Parser};
 use crate::rtree::{RegexSearchError, ScopedMergeRules, TextBlockIndex as RsTextBlockIndex};
-use crate::text::{CharBBox, Rectangle as RsRectangle, extract_char_bboxes, extract_text_blocks};
+use crate::text::{
+    CharBBox, ExpandDirection, ExpandError, Rectangle as RsRectangle, extract_char_bboxes,
+    extract_text_blocks,
+};
 use crate::tokenizer::Lexer;
 
 #[pyclass]
@@ -31,6 +34,21 @@ impl Rectangle {
             left: self.left,
             bottom: self.bottom,
             right: self.right,
+        }
+    }
+
+    fn with_overrides(
+        &self,
+        top: Option<f64>,
+        left: Option<f64>,
+        bottom: Option<f64>,
+        right: Option<f64>,
+    ) -> Self {
+        Self {
+            top: top.unwrap_or(self.top),
+            left: left.unwrap_or(self.left),
+            bottom: bottom.unwrap_or(self.bottom),
+            right: right.unwrap_or(self.right),
         }
     }
 
@@ -92,6 +110,90 @@ impl Rectangle {
             bottom,
             right,
         }
+    }
+
+    #[pyo3(signature = (*, top=None, left=None, bottom=None, right=None))]
+    fn with_coords(
+        &self,
+        top: Option<f64>,
+        left: Option<f64>,
+        bottom: Option<f64>,
+        right: Option<f64>,
+    ) -> Self {
+        self.with_overrides(top, left, bottom, right)
+    }
+
+    fn with_top(&self, top: f64) -> Self {
+        self.with_overrides(Some(top), None, None, None)
+    }
+
+    fn with_left(&self, left: f64) -> Self {
+        self.with_overrides(None, Some(left), None, None)
+    }
+
+    fn with_bottom(&self, bottom: f64) -> Self {
+        self.with_overrides(None, None, Some(bottom), None)
+    }
+
+    fn with_right(&self, right: f64) -> Self {
+        self.with_overrides(None, None, None, Some(right))
+    }
+
+    #[pyo3(signature = (*, top=0.0, bottom=0.0, left=0.0, right=0.0))]
+    fn with_margin(&self, top: f64, bottom: f64, left: f64, right: f64) -> Self {
+        let normalized_left = self.left.min(self.right);
+        let normalized_right = self.left.max(self.right);
+        let normalized_top = self.top.min(self.bottom);
+        let normalized_bottom = self.top.max(self.bottom);
+        Self {
+            top: normalized_top - top,
+            left: normalized_left - left,
+            bottom: normalized_bottom + bottom,
+            right: normalized_right + right,
+        }
+    }
+
+    fn expand(
+        &self,
+        rectangles: Vec<Rectangle>,
+        directions: Vec<String>,
+        maximum_bounds: Rectangle,
+    ) -> PyResult<Self> {
+        let mut parsed_directions = Vec::new();
+        for direction in directions {
+            let parsed = match direction.as_str() {
+                "up" => ExpandDirection::Up,
+                "down" => ExpandDirection::Down,
+                "left" => ExpandDirection::Left,
+                "right" => ExpandDirection::Right,
+                _ => {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "invalid direction '{}'; expected one of: up, down, left, right",
+                        direction
+                    )));
+                }
+            };
+            if !parsed_directions.contains(&parsed) {
+                parsed_directions.push(parsed);
+            }
+        }
+        if parsed_directions.is_empty() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "directions must include at least one of: up, down, left, right",
+            ));
+        }
+
+        let blockers: Vec<RsRectangle> = rectangles.iter().map(|rect| rect.as_core()).collect();
+        let expanded = self
+            .as_core()
+            .expand_constrained(&blockers, &parsed_directions, &maximum_bounds.as_core())
+            .map_err(expand_error_to_py)?;
+        Ok(Self {
+            top: expanded.top,
+            left: expanded.left,
+            bottom: expanded.bottom,
+            right: expanded.right,
+        })
     }
 
     fn get_center(&self) -> (f64, f64) {
@@ -498,6 +600,17 @@ fn parse_error_to_py(err: ParseError) -> PyErr {
     }
 }
 
+fn expand_error_to_py(err: ExpandError) -> PyErr {
+    match err {
+        ExpandError::EmptyDirections => pyo3::exceptions::PyValueError::new_err(
+            "directions must include at least one of: up, down, left, right",
+        ),
+        ExpandError::InvalidMaximumBounds => pyo3::exceptions::PyValueError::new_err(
+            "maximum_bounds must fully contain the rectangle being expanded",
+        ),
+    }
+}
+
 fn filter_chars_by_scope(chars: &[CharBBox], rect: RsRectangle, overlap: f64) -> Vec<CharBBox> {
     let overlap = overlap.clamp(0.00001, 1.0);
     chars
@@ -564,4 +677,92 @@ fn reap(m: &Bound<'_, PyModule>) -> PyResult<()> {
         ],
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Rectangle;
+
+    #[test]
+    fn rectangle_with_coords_replaces_only_specified_values() {
+        let rect = Rectangle::new(10.0, 20.0, 30.0, 40.0);
+        let updated = rect.with_coords(Some(11.0), None, None, Some(44.0));
+        assert!(updated == Rectangle::new(11.0, 20.0, 30.0, 44.0));
+        assert!(rect == Rectangle::new(10.0, 20.0, 30.0, 40.0));
+    }
+
+    #[test]
+    fn rectangle_side_helpers_chain() {
+        let rect = Rectangle::new(5.0, 10.0, 15.0, 20.0);
+        let updated = rect.with_bottom(50.0).with_right(25.0);
+        assert!(updated == Rectangle::new(5.0, 10.0, 50.0, 25.0));
+        assert!(rect == Rectangle::new(5.0, 10.0, 15.0, 20.0));
+    }
+
+    #[test]
+    fn rectangle_with_margin_expands_normalized_rect() {
+        let rect = Rectangle::new(10.0, 20.0, 30.0, 40.0);
+        let updated = rect.with_margin(1.0, 2.0, 3.0, 4.0);
+        assert!(updated == Rectangle::new(9.0, 17.0, 32.0, 44.0));
+    }
+
+    #[test]
+    fn rectangle_with_margin_normalizes_before_applying_margins() {
+        let rect = Rectangle::new(30.0, 40.0, 10.0, 20.0);
+        let updated = rect.with_margin(1.0, 2.0, 3.0, 4.0);
+        assert!(updated == Rectangle::new(9.0, 17.0, 32.0, 44.0));
+    }
+
+    #[test]
+    fn rectangle_with_margin_negative_values_shrink() {
+        let rect = Rectangle::new(0.0, 0.0, 10.0, 20.0);
+        let updated = rect.with_margin(-1.0, -2.0, -3.0, -4.0);
+        assert!(updated == Rectangle::new(1.0, 3.0, 8.0, 16.0));
+    }
+
+    #[test]
+    fn rectangle_invalid_outputs_are_allowed_and_detectable_with_validate() {
+        let rect = Rectangle::new(0.0, 0.0, 10.0, 10.0);
+        let updated = rect.with_top(11.0);
+        assert!(updated == Rectangle::new(11.0, 0.0, 10.0, 10.0));
+        assert!(!updated.validate());
+    }
+
+    #[test]
+    fn rectangle_expand_returns_expected_result_for_simple_case() {
+        let rect = Rectangle::new(10.0, 10.0, 20.0, 20.0);
+        let blockers = vec![Rectangle::new(0.0, 24.0, 100.0, 80.0)];
+        let max_bounds = Rectangle::new(0.0, 0.0, 100.0, 100.0);
+        let expanded = rect
+            .expand(blockers, vec!["right".to_string()], max_bounds)
+            .expect("expand should succeed");
+        assert!(expanded == Rectangle::new(10.0, 10.0, 20.0, 24.0));
+        assert!(rect == Rectangle::new(10.0, 10.0, 20.0, 20.0));
+    }
+
+    #[test]
+    fn rectangle_expand_rejects_invalid_direction() {
+        let rect = Rectangle::new(10.0, 10.0, 20.0, 20.0);
+        let max_bounds = Rectangle::new(0.0, 0.0, 100.0, 100.0);
+        let err = rect
+            .expand(vec![], vec!["north".to_string()], max_bounds)
+            .expect_err("expand should fail");
+        assert_eq!(
+            err.to_string(),
+            "ValueError: invalid direction 'north'; expected one of: up, down, left, right"
+        );
+    }
+
+    #[test]
+    fn rectangle_expand_surfaces_maximum_bounds_errors() {
+        let rect = Rectangle::new(10.0, 10.0, 20.0, 20.0);
+        let max_bounds = Rectangle::new(12.0, 12.0, 18.0, 18.0);
+        let err = rect
+            .expand(vec![], vec!["right".to_string()], max_bounds)
+            .expect_err("expand should fail");
+        assert_eq!(
+            err.to_string(),
+            "ValueError: maximum_bounds must fully contain the rectangle being expanded"
+        );
+    }
 }
