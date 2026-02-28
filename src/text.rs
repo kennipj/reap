@@ -20,6 +20,8 @@ pub struct Rectangle {
     pub right: f64,
 }
 
+const MAX_EXPAND_ITERATIONS: usize = 256;
+
 impl Rectangle {
     fn normalized(&self) -> (f64, f64, f64, f64) {
         let left = self.left.min(self.right);
@@ -124,6 +126,203 @@ impl Rectangle {
         };
         Point { x, y }
     }
+
+    fn from_normalized(left: f64, top: f64, right: f64, bottom: f64) -> Self {
+        Self {
+            top,
+            left,
+            bottom,
+            right,
+        }
+    }
+
+    fn contains_normalized(&self, other: &Rectangle) -> bool {
+        self.left <= other.left
+            && self.top <= other.top
+            && self.right >= other.right
+            && self.bottom >= other.bottom
+    }
+
+    fn horizontal_overlap_with(&self, other: &Rectangle) -> bool {
+        self.left < other.right && other.left < self.right
+    }
+
+    fn vertical_overlap_with(&self, other: &Rectangle) -> bool {
+        self.top < other.bottom && other.top < self.bottom
+    }
+
+    fn state_key(&self) -> (u64, u64, u64, u64) {
+        fn canonical_zero(v: f64) -> f64 {
+            if v == 0.0 { 0.0 } else { v }
+        }
+        (
+            canonical_zero(self.top).to_bits(),
+            canonical_zero(self.left).to_bits(),
+            canonical_zero(self.bottom).to_bits(),
+            canonical_zero(self.right).to_bits(),
+        )
+    }
+
+    fn area(&self) -> f64 {
+        (self.right - self.left).max(0.0) * (self.bottom - self.top).max(0.0)
+    }
+
+    fn pick_smallest_rect(rects: &[Rectangle]) -> Rectangle {
+        let mut best = rects[0];
+        for rect in &rects[1..] {
+            let area_cmp = rect.area().total_cmp(&best.area());
+            if area_cmp.is_lt() || (area_cmp.is_eq() && rect.state_key() < best.state_key()) {
+                best = *rect;
+            }
+        }
+        best
+    }
+
+    fn expand_next_state(
+        current: Rectangle,
+        base: Rectangle,
+        blockers: &[Rectangle],
+        directions: &[ExpandDirection],
+        max_bounds: Rectangle,
+    ) -> Rectangle {
+        let mut next = current;
+
+        for direction in [ExpandDirection::Up, ExpandDirection::Down] {
+            if !directions.contains(&direction) {
+                continue;
+            }
+            match direction {
+                ExpandDirection::Up => {
+                    let candidate = blockers
+                        .iter()
+                        .filter(|blocker| {
+                            blocker.horizontal_overlap_with(&next) && blocker.bottom <= base.top
+                        })
+                        .map(|blocker| blocker.bottom)
+                        .max_by(|a, b| a.total_cmp(b))
+                        .unwrap_or(max_bounds.top);
+                    next.top = candidate.min(base.top).max(max_bounds.top);
+                }
+                ExpandDirection::Down => {
+                    let candidate = blockers
+                        .iter()
+                        .filter(|blocker| {
+                            blocker.horizontal_overlap_with(&next) && blocker.top >= base.bottom
+                        })
+                        .map(|blocker| blocker.top)
+                        .min_by(|a, b| a.total_cmp(b))
+                        .unwrap_or(max_bounds.bottom);
+                    next.bottom = candidate.max(base.bottom).min(max_bounds.bottom);
+                }
+                _ => {}
+            }
+        }
+
+        for direction in [ExpandDirection::Left, ExpandDirection::Right] {
+            if !directions.contains(&direction) {
+                continue;
+            }
+            match direction {
+                ExpandDirection::Left => {
+                    let candidate = blockers
+                        .iter()
+                        .filter(|blocker| {
+                            blocker.vertical_overlap_with(&next) && blocker.right <= base.left
+                        })
+                        .map(|blocker| blocker.right)
+                        .max_by(|a, b| a.total_cmp(b))
+                        .unwrap_or(max_bounds.left);
+                    next.left = candidate.min(base.left).max(max_bounds.left);
+                }
+                ExpandDirection::Right => {
+                    let candidate = blockers
+                        .iter()
+                        .filter(|blocker| {
+                            blocker.vertical_overlap_with(&next) && blocker.left >= base.right
+                        })
+                        .map(|blocker| blocker.left)
+                        .min_by(|a, b| a.total_cmp(b))
+                        .unwrap_or(max_bounds.right);
+                    next.right = candidate.max(base.right).min(max_bounds.right);
+                }
+                _ => {}
+            }
+        }
+
+        next
+    }
+
+    fn expand_constrained_with_limit(
+        &self,
+        blockers: &[Rectangle],
+        directions: &[ExpandDirection],
+        maximum_bounds: &Rectangle,
+        max_iterations: usize,
+    ) -> Result<Rectangle, ExpandError> {
+        if directions.is_empty() {
+            return Err(ExpandError::EmptyDirections);
+        }
+
+        let (base_left, base_top, base_right, base_bottom) = self.normalized();
+        let base = Rectangle::from_normalized(base_left, base_top, base_right, base_bottom);
+
+        let (max_left, max_top, max_right, max_bottom) = maximum_bounds.normalized();
+        let max_bounds = Rectangle::from_normalized(max_left, max_top, max_right, max_bottom);
+
+        if !max_bounds.contains_normalized(&base) {
+            return Err(ExpandError::InvalidMaximumBounds);
+        }
+
+        let normalized_blockers: Vec<Rectangle> = blockers
+            .iter()
+            .map(|blocker| {
+                let (left, top, right, bottom) = blocker.normalized();
+                Rectangle::from_normalized(left, top, right, bottom)
+            })
+            .collect();
+
+        let mut current = base;
+        let mut history: Vec<Rectangle> = Vec::new();
+        let mut seen: HashMap<(u64, u64, u64, u64), usize> = HashMap::new();
+
+        for _ in 0..max_iterations {
+            let state = current.state_key();
+            if let Some(start) = seen.get(&state) {
+                return Ok(Rectangle::pick_smallest_rect(&history[*start..]));
+            }
+            seen.insert(state, history.len());
+            history.push(current);
+
+            let next = Rectangle::expand_next_state(
+                current,
+                base,
+                &normalized_blockers,
+                directions,
+                max_bounds,
+            );
+            if next == current {
+                return Ok(next);
+            }
+            current = next;
+        }
+
+        history.push(current);
+        Ok(Rectangle::pick_smallest_rect(&history))
+    }
+
+    pub fn expand_constrained(
+        &self,
+        blockers: &[Rectangle],
+        directions: &[ExpandDirection],
+        maximum_bounds: &Rectangle,
+    ) -> Result<Rectangle, ExpandError> {
+        self.expand_constrained_with_limit(
+            blockers,
+            directions,
+            maximum_bounds,
+            MAX_EXPAND_ITERATIONS,
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -136,6 +335,20 @@ pub enum LeftRight {
 pub enum TopBottom {
     Top,
     Bottom,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ExpandDirection {
+    Up,
+    Down,
+    Left,
+    Right,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExpandError {
+    EmptyDirections,
+    InvalidMaximumBounds,
 }
 
 #[derive(Debug, Clone)]
@@ -4288,6 +4501,260 @@ mod tests {
         )
         .expect("decoded stream");
         assert_eq!(decoded, raw);
+    }
+
+    fn make_bbox_rect(top: f64, left: f64, bottom: f64, right: f64) -> Rectangle {
+        Rectangle {
+            top,
+            left,
+            bottom,
+            right,
+        }
+    }
+
+    fn down_right_boundary_fixture_blockers() -> Vec<Rectangle> {
+        vec![
+            // Constrains downward expansion for the initial horizontal span.
+            make_bbox_rect(
+                130.56399999999996,
+                30.284000000000002,
+                141.48400000000004,
+                71.38000000000001,
+            ),
+            // Constrains rightward expansion once the rectangle has expanded downward.
+            make_bbox_rect(
+                86.80799999999988,
+                303.5,
+                97.72799999999995,
+                403.0919999999997,
+            ),
+            // Nearby right-column geometry retained to keep the regression realistic.
+            make_bbox_rect(
+                108.04799999999989,
+                303.5,
+                118.96799999999996,
+                377.7479999999999,
+            ),
+        ]
+    }
+
+    #[test]
+    fn expand_constrained_single_direction_uses_nearest_blockers() {
+        let base = make_bbox_rect(10.0, 10.0, 20.0, 20.0);
+        let max_bounds = make_bbox_rect(0.0, 0.0, 100.0, 100.0);
+        let blockers = vec![
+            make_bbox_rect(0.0, 0.0, 8.0, 40.0),
+            make_bbox_rect(25.0, 0.0, 80.0, 40.0),
+            make_bbox_rect(0.0, 0.0, 50.0, 9.0),
+            make_bbox_rect(0.0, 24.0, 50.0, 80.0),
+        ];
+
+        let up = base
+            .expand_constrained(&blockers, &[ExpandDirection::Up], &max_bounds)
+            .expect("expand up");
+        assert_eq!(up, make_bbox_rect(8.0, 10.0, 20.0, 20.0));
+
+        let down = base
+            .expand_constrained(&blockers, &[ExpandDirection::Down], &max_bounds)
+            .expect("expand down");
+        assert_eq!(down, make_bbox_rect(10.0, 10.0, 25.0, 20.0));
+
+        let left = base
+            .expand_constrained(&blockers, &[ExpandDirection::Left], &max_bounds)
+            .expect("expand left");
+        assert_eq!(left, make_bbox_rect(10.0, 9.0, 20.0, 20.0));
+
+        let right = base
+            .expand_constrained(&blockers, &[ExpandDirection::Right], &max_bounds)
+            .expect("expand right");
+        assert_eq!(right, make_bbox_rect(10.0, 10.0, 20.0, 24.0));
+    }
+
+    #[test]
+    fn expand_constrained_without_blockers_uses_maximum_bounds() {
+        let base = make_bbox_rect(10.0, 10.0, 20.0, 20.0);
+        let max_bounds = make_bbox_rect(0.0, 0.0, 100.0, 100.0);
+        let expanded = base
+            .expand_constrained(
+                &[],
+                &[
+                    ExpandDirection::Up,
+                    ExpandDirection::Down,
+                    ExpandDirection::Left,
+                    ExpandDirection::Right,
+                ],
+                &max_bounds,
+            )
+            .expect("expand all directions");
+        assert_eq!(expanded, max_bounds);
+    }
+
+    #[test]
+    fn expand_constrained_resolves_coupled_right_down_constraints() {
+        let base = make_bbox_rect(10.0, 10.0, 20.0, 20.0);
+        let max_bounds = make_bbox_rect(0.0, 0.0, 100.0, 100.0);
+        let blockers = vec![
+            make_bbox_rect(0.0, 40.0, 24.0, 80.0),
+            make_bbox_rect(22.0, 30.0, 100.0, 80.0),
+            make_bbox_rect(60.0, 0.0, 100.0, 24.0),
+            make_bbox_rect(30.0, 26.0, 100.0, 100.0),
+        ];
+        let expanded = base
+            .expand_constrained(
+                &blockers,
+                &[ExpandDirection::Right, ExpandDirection::Down],
+                &max_bounds,
+            )
+            .expect("expand right+down");
+        assert_eq!(expanded, make_bbox_rect(10.0, 10.0, 60.0, 26.0));
+    }
+
+    #[test]
+    fn expand_constrained_never_shrinks_from_intruding_blockers() {
+        let base = make_bbox_rect(10.0, 10.0, 20.0, 20.0);
+        let max_bounds = make_bbox_rect(10.0, 10.0, 100.0, 100.0);
+        let blockers = vec![
+            make_bbox_rect(0.0, 0.0, 15.0, 80.0),
+            make_bbox_rect(0.0, 0.0, 80.0, 15.0),
+        ];
+        let expanded = base
+            .expand_constrained(
+                &blockers,
+                &[ExpandDirection::Up, ExpandDirection::Left],
+                &max_bounds,
+            )
+            .expect("expand up+left");
+        assert_eq!(expanded, base);
+    }
+
+    #[test]
+    fn expand_constrained_normalizes_inputs_and_output() {
+        let base = make_bbox_rect(30.0, 40.0, 10.0, 20.0);
+        let blockers = vec![make_bbox_rect(100.0, 90.0, 0.0, 80.0)];
+        let max_bounds = make_bbox_rect(100.0, 100.0, 0.0, 0.0);
+        let expanded = base
+            .expand_constrained(&blockers, &[ExpandDirection::Right], &max_bounds)
+            .expect("expand right");
+        assert_eq!(expanded, make_bbox_rect(10.0, 20.0, 30.0, 80.0));
+    }
+
+    #[test]
+    fn expand_constrained_errors_on_invalid_maximum_bounds() {
+        let base = make_bbox_rect(10.0, 10.0, 20.0, 20.0);
+        let max_bounds = make_bbox_rect(12.0, 12.0, 18.0, 18.0);
+        let err = base
+            .expand_constrained(&[], &[ExpandDirection::Right], &max_bounds)
+            .expect_err("expected invalid bounds");
+        assert_eq!(err, ExpandError::InvalidMaximumBounds);
+    }
+
+    #[test]
+    fn expand_constrained_errors_on_empty_directions() {
+        let base = make_bbox_rect(10.0, 10.0, 20.0, 20.0);
+        let max_bounds = make_bbox_rect(0.0, 0.0, 100.0, 100.0);
+        let err = base
+            .expand_constrained(&[], &[], &max_bounds)
+            .expect_err("expected empty directions");
+        assert_eq!(err, ExpandError::EmptyDirections);
+    }
+
+    #[test]
+    fn expand_constrained_max_iteration_fallback_returns_conservative_smallest_state() {
+        let base = make_bbox_rect(10.0, 10.0, 20.0, 20.0);
+        let max_bounds = make_bbox_rect(0.0, 0.0, 40.0, 40.0);
+        let blockers = vec![
+            make_bbox_rect(25.0, 20.0, 100.0, 100.0),
+            make_bbox_rect(20.0, 25.0, 100.0, 100.0),
+        ];
+        let expanded = base
+            .expand_constrained_with_limit(
+                &blockers,
+                &[ExpandDirection::Right, ExpandDirection::Down],
+                &max_bounds,
+                1,
+            )
+            .expect("max-iteration fallback should return smallest state");
+        assert_eq!(expanded, base);
+    }
+
+    #[test]
+    fn expand_constrained_rects_md_right_down_regression() {
+        let base = make_bbox_rect(79.15499999999997, 22.83, 85.44299999999998, 152.43);
+        let max_bounds = make_bbox_rect(
+            21.519999999999982,
+            15.211999999999932,
+            2985.3595,
+            593.0839999999995,
+        );
+        let blockers = down_right_boundary_fixture_blockers();
+
+        let expanded = base
+            .expand_constrained(
+                &blockers,
+                &[ExpandDirection::Right, ExpandDirection::Down],
+                &max_bounds,
+            )
+            .expect("rects.md regression should expand deterministically");
+        assert_eq!(
+            expanded,
+            make_bbox_rect(79.15499999999997, 22.83, 130.56399999999996, 303.5)
+        );
+    }
+
+    #[test]
+    fn expand_constrained_rects_md_converges_within_three_iterations() {
+        let base = make_bbox_rect(79.15499999999997, 22.83, 85.44299999999998, 152.43);
+        let max_bounds = make_bbox_rect(
+            21.519999999999982,
+            15.211999999999932,
+            2985.3595,
+            593.0839999999995,
+        );
+        let blockers = down_right_boundary_fixture_blockers();
+
+        let expanded = base
+            .expand_constrained_with_limit(
+                &blockers,
+                &[ExpandDirection::Right, ExpandDirection::Down],
+                &max_bounds,
+                3,
+            )
+            .expect("rects.md regression should converge quickly");
+        assert_eq!(
+            expanded,
+            make_bbox_rect(79.15499999999997, 22.83, 130.56399999999996, 303.5)
+        );
+    }
+
+    #[test]
+    fn expand_constrained_rects_md_is_order_invariant_for_down_right() {
+        let base = make_bbox_rect(79.15499999999997, 22.83, 85.44299999999998, 152.43);
+        let max_bounds = make_bbox_rect(
+            21.519999999999982,
+            15.211999999999932,
+            2985.3595,
+            593.0839999999995,
+        );
+        let blockers = down_right_boundary_fixture_blockers();
+        let expected = make_bbox_rect(79.15499999999997, 22.83, 130.56399999999996, 303.5);
+
+        let down_right = base
+            .expand_constrained(
+                &blockers,
+                &[ExpandDirection::Down, ExpandDirection::Right],
+                &max_bounds,
+            )
+            .expect("down-right should succeed");
+        let right_down = base
+            .expand_constrained(
+                &blockers,
+                &[ExpandDirection::Right, ExpandDirection::Down],
+                &max_bounds,
+            )
+            .expect("right-down should succeed");
+
+        assert_eq!(down_right, expected);
+        assert_eq!(right_down, expected);
     }
 
     #[test]
