@@ -2374,6 +2374,20 @@ fn normalize_rect_tuple(r: (f64, f64, f64, f64)) -> (f64, f64, f64, f64) {
     (x0.min(x1), y0.min(y1), x0.max(x1), y0.max(y1))
 }
 
+fn type0_descendant_font_dict<'a>(
+    doc: &'a PdfDoc,
+    type0_dict: &'a HashMap<String, Object>,
+) -> Option<&'a HashMap<String, Object>> {
+    let descendants = type0_dict
+        .get("DescendantFonts")
+        .map(|value| doc.resolve(value))
+        .and_then(|value| value.as_array())?;
+    descendants
+        .first()
+        .map(|first| doc.resolve(first))
+        .and_then(|first| first.as_dict())
+}
+
 fn build_font_map(doc: &PdfDoc, resources: Option<&Object>) -> HashMap<String, FontMetrics> {
     let mut out = HashMap::new();
     let resources = match resources.and_then(|r| r.as_dict()) {
@@ -2465,11 +2479,7 @@ fn build_font_map(doc: &PdfDoc, resources: Option<&Object>) -> HashMap<String, F
         let mut descendant_dict: Option<&HashMap<String, Object>> = None;
         let mut encoding: Option<EncodingMap> = None;
         if subtype == Some("Type0") {
-            if let Some(Object::Array(desc)) = dict.get("DescendantFonts") {
-                if let Some(first) = desc.get(0) {
-                    descendant_dict = doc.resolve(first).as_dict();
-                }
-            }
+            descendant_dict = type0_descendant_font_dict(doc, dict);
             if let Some(enc) = dict.get("Encoding") {
                 encoding = parse_encoding(doc, enc);
             }
@@ -4395,6 +4405,56 @@ mod tests {
         assert_eq!(parsed[2].start, 20);
         assert_eq!(parsed[2].end, 22);
         assert_eq!(parsed[2].width, 501);
+    }
+
+    #[test]
+    fn type0_descendant_font_dict_resolves_indirect_array() {
+        let doc = PdfDoc {
+            objects: HashMap::from([
+                (
+                    (1, 0),
+                    Object::Dictionary(HashMap::from([(
+                        "DescendantFonts".to_string(),
+                        Object::Reference {
+                            obj_num: 2,
+                            gen_num: 0,
+                        },
+                    )])),
+                ),
+                (
+                    (2, 0),
+                    Object::Array(vec![Object::Reference {
+                        obj_num: 3,
+                        gen_num: 0,
+                    }]),
+                ),
+                (
+                    (3, 0),
+                    Object::Dictionary(HashMap::from([
+                        (
+                            "Subtype".to_string(),
+                            Object::Name("CIDFontType2".to_string()),
+                        ),
+                        ("DW".to_string(), Object::Integer(720)),
+                    ])),
+                ),
+            ]),
+            trailer: None,
+        };
+
+        let type0_dict = doc
+            .objects
+            .get(&(1, 0))
+            .and_then(|obj| obj.as_dict())
+            .expect("expected Type0 font dictionary");
+        let descendant = type0_descendant_font_dict(&doc, type0_dict)
+            .expect("expected resolved descendant font dictionary");
+
+        assert_eq!(
+            descendant.get("Subtype").and_then(|v| v.as_name()),
+            Some("CIDFontType2")
+        );
+        assert_eq!(descendant.get("DW").and_then(|v| v.as_i64()), Some(720));
     }
 
     #[test]

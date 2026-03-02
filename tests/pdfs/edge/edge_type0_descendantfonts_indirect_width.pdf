@@ -1,0 +1,68 @@
+%PDF-1.4
+% synthetic edge fixture
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F0 4 0 R >> >> /Contents 5 0 R >>
+endobj
+4 0 obj
+<< /Type /Font /Subtype /Type0 /BaseFont /SyntheticCIDNeutral /Encoding /Identity-H /DescendantFonts 9 0 R /ToUnicode 7 0 R >>
+endobj
+5 0 obj
+<< >>
+stream
+BT /F0 12 Tf 40 730 Td <0041004C0050004800410020004D00450054005200490043002000500041004E0045004C> Tj ET
+BT /F0 12 Tf 40 704 Td <00520041004E0047004500200043004800450043004B00200056004500430054004F0052> Tj ET
+BT /F0 12 Tf 560 678 Td <004500440047004500570049004400540048> Tj ET
+endstream
+endobj
+6 0 obj
+<< /Type /Font /Subtype /CIDFontType2 /BaseFont /SyntheticCIDNeutral /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /FontDescriptor 8 0 R /DW 1000 /W [32 126 280.25] >>
+endobj
+7 0 obj
+<< >>
+stream
+/CIDInit /ProcSet findresource begin
+12 dict begin
+begincmap
+/CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> def
+/CMapName /Identity-H def
+/CMapType 2 def
+1 begincodespacerange
+<0000> <00FF>
+endcodespacerange
+1 beginbfrange
+<0020> <007E> <0020>
+endbfrange
+endcmap
+CMapName currentdict /CMap defineresource pop
+end
+end
+endstream
+endobj
+8 0 obj
+<< /Type /FontDescriptor /FontName /SyntheticCIDNeutral /Ascent 880 /Descent -220 /CapHeight 700 /Flags 4 /ItalicAngle 0 /StemV 80 >>
+endobj
+9 0 obj
+[6 0 R]
+endobj
+xref
+0 10
+0000000000 65535 f 
+0000000015 00000 n 
+0000000064 00000 n 
+0000000121 00000 n 
+0000000247 00000 n 
+0000000391 00000 n 
+0000000742 00000 n 
+0000000947 00000 n 
+0000001342 00000 n 
+0000001498 00000 n 
+trailer << /Size 10 /Root 1 0 R >>
+startxref
+1528
+%%EOF

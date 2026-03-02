@@ -362,6 +362,38 @@ fn cid_widths_are_not_near_zero() {
 }
 
 #[test]
+fn indirect_descendantfonts_type0_blocks_stay_on_page() {
+    let doc = load_doc(&edge_pdf("edge_type0_descendantfonts_indirect_width.pdf"));
+    let words = extract_text_blocks(&doc);
+    assert!(
+        !words.is_empty(),
+        "expected extracted words for indirect DescendantFonts fixture"
+    );
+
+    assert!(
+        words
+            .iter()
+            .any(|w| w.page_index == 0 && w.text == "EDGEWIDTH"),
+        "expected right-edge EDGEWIDTH token in fixture"
+    );
+
+    for word in words.iter().filter(|w| w.page_index == 0) {
+        assert!(
+            within_page(&word.bbox),
+            "expected page-0 word '{}' within page bounds, got {:?}",
+            word.text,
+            word.bbox
+        );
+        assert!(
+            word.bbox.right <= PAGE_WIDTH_TOL,
+            "expected on-page right bound for '{}', got {:?}",
+            word.text,
+            word.bbox
+        );
+    }
+}
+
+#[test]
 fn filled_courier_tokens_are_not_truncated() {
     let doc = load_doc(&edge_pdf("edge_courier_fields.pdf"));
     let words = extract_text_blocks(&doc);

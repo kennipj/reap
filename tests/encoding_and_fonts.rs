@@ -2,6 +2,7 @@ mod common;
 
 use std::fs;
 
+use reap::model::Object;
 use reap::rtree::TextBlockIndex;
 use reap::text::{extract_char_bboxes, extract_text_blocks};
 
@@ -182,6 +183,103 @@ fn type0_tounicode_avoids_byte_fallback_garble() {
         !joined.contains("VHFXULW"),
         "found Caesar-shift marker from incorrect byte-level fallback decoding"
     );
+}
+
+#[test]
+fn type0_descendantfonts_indirect_fixture_has_cid_widths() {
+    let doc = load_doc(&edge_pdf("edge_type0_descendantfonts_indirect_width.pdf"));
+    let type0_dict = doc
+        .objects
+        .values()
+        .find_map(|obj| {
+            let dict = obj.as_dict()?;
+            (dict.get("Subtype").and_then(|v| v.as_name()) == Some("Type0")).then_some(dict)
+        })
+        .expect("expected Type0 font dictionary in fixture");
+
+    let descendants_ref = type0_dict
+        .get("DescendantFonts")
+        .expect("expected DescendantFonts key");
+    assert!(
+        matches!(descendants_ref, Object::Reference { .. }),
+        "expected DescendantFonts to be an indirect object reference"
+    );
+
+    let descendants = doc
+        .resolve(descendants_ref)
+        .as_array()
+        .expect("expected DescendantFonts reference to resolve to an array");
+    assert_eq!(
+        descendants.len(),
+        1,
+        "expected exactly one descendant CIDFont"
+    );
+
+    let cid_dict = doc
+        .resolve(&descendants[0])
+        .as_dict()
+        .expect("expected first descendant font dictionary");
+    assert!(
+        cid_dict.get("DW").is_some(),
+        "expected descendant CIDFont default width DW"
+    );
+    let cid_widths = cid_dict
+        .get("W")
+        .and_then(|v| v.as_array())
+        .expect("expected descendant CIDFont width array W");
+    assert!(
+        cid_widths.iter().any(|v| matches!(v, Object::Real(_))),
+        "expected CID width array to include real width values"
+    );
+}
+
+#[test]
+fn type0_descendantfonts_indirect_cid_widths_keep_edge_token_on_page() {
+    let doc = load_doc(&edge_pdf("edge_type0_descendantfonts_indirect_width.pdf"));
+    let blocks = extract_text_blocks(&doc);
+    assert!(
+        !blocks.is_empty(),
+        "expected non-empty text blocks for indirect DescendantFonts fixture"
+    );
+
+    let joined = blocks
+        .iter()
+        .map(|b| b.text.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+    for phrase in ["ALPHA METRIC PANEL", "RANGE CHECK VECTOR"] {
+        assert!(
+            joined.contains(phrase),
+            "expected phrase {:?} in extracted text",
+            phrase
+        );
+    }
+
+    let edge_token = blocks
+        .iter()
+        .find(|b| b.page_index == 0 && b.text == "EDGEWIDTH")
+        .expect("expected EDGEWIDTH token from right-edge text run");
+    let edge_width = edge_token.bbox.right - edge_token.bbox.left;
+    assert!(
+        edge_width < 50.0,
+        "expected compact width for EDGEWIDTH token, got {} ({:?})",
+        edge_width,
+        edge_token.bbox
+    );
+    assert!(
+        edge_token.bbox.right <= 613.0,
+        "expected EDGEWIDTH token to stay on-page, got {:?}",
+        edge_token.bbox
+    );
+
+    for block in blocks.iter().filter(|b| b.page_index == 0) {
+        assert!(
+            block.bbox.right <= 613.0,
+            "expected page-0 block right edge on-page, got '{}' {:?}",
+            block.text,
+            block.bbox
+        );
+    }
 }
 
 #[test]
