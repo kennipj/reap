@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::sync::{Arc, OnceLock, RwLock};
 
@@ -745,7 +745,8 @@ pub fn extract_char_bboxes(doc: &PdfDoc) -> Vec<CharBBox> {
     let pages = collect_pages(doc);
     let layouts = page_layouts_for_pages(doc, &pages);
     let raw = extract_char_bboxes_raw_from_pages(doc, &pages);
-    canonicalize_char_bboxes(raw, &layouts)
+    let canonicalized = canonicalize_char_bboxes(raw, &layouts);
+    dedupe_exact_chars(canonicalized)
 }
 
 fn extract_char_bboxes_raw_from_pages(doc: &PdfDoc, pages: &[Object]) -> Vec<CharBBox> {
@@ -981,14 +982,16 @@ pub fn extract_text_blocks(doc: &PdfDoc) -> Vec<TextBlock> {
     let pages = collect_pages(doc);
     let layouts = page_layouts_for_pages(doc, &pages);
     let raw = extract_text_blocks_raw(doc, &pages);
-    canonicalize_text_blocks(raw, &layouts)
+    let canonicalized = canonicalize_text_blocks(raw, &layouts);
+    dedupe_exact_blocks(canonicalized)
 }
 
 pub fn extract_char_bboxes_with_style(doc: &PdfDoc) -> Vec<(CharBBox, TextStyle)> {
     let pages = collect_pages(doc);
     let layouts = page_layouts_for_pages(doc, &pages);
     let raw = extract_char_bboxes_with_style_raw_from_pages(doc, &pages);
-    canonicalize_char_bboxes_with_style(raw, &layouts)
+    let canonicalized = canonicalize_char_bboxes_with_style(raw, &layouts);
+    dedupe_exact_chars_with_style(canonicalized)
 }
 
 fn extract_char_bboxes_with_style_raw_from_pages(
@@ -2188,6 +2191,64 @@ fn canonicalize_text_blocks(blocks: Vec<TextBlock>, layouts: &[PageLayout]) -> V
             bbox: canonicalize_rect(block.bbox, block.page_index, layouts),
         })
         .collect()
+}
+
+type RectBits = (u64, u64, u64, u64);
+type CharKey = (usize, char, RectBits);
+type BlockKey = (usize, String, RectBits);
+
+fn non_negative_zero_bits(value: f64) -> u64 {
+    if value == 0.0 {
+        0.0f64.to_bits()
+    } else {
+        value.to_bits()
+    }
+}
+
+fn rect_bits(rect: Rectangle) -> RectBits {
+    let rect = normalize_rectangle(rect);
+    (
+        non_negative_zero_bits(rect.left),
+        non_negative_zero_bits(rect.top),
+        non_negative_zero_bits(rect.right),
+        non_negative_zero_bits(rect.bottom),
+    )
+}
+
+fn dedupe_exact_chars(chars: Vec<CharBBox>) -> Vec<CharBBox> {
+    let mut seen: HashSet<CharKey> = HashSet::new();
+    let mut out = Vec::with_capacity(chars.len());
+    for ch in chars {
+        let key = (ch.page_index, ch.ch, rect_bits(ch.bbox));
+        if seen.insert(key) {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+fn dedupe_exact_blocks(blocks: Vec<TextBlock>) -> Vec<TextBlock> {
+    let mut seen: HashSet<BlockKey> = HashSet::new();
+    let mut out = Vec::with_capacity(blocks.len());
+    for block in blocks {
+        let key = (block.page_index, block.text.clone(), rect_bits(block.bbox));
+        if seen.insert(key) {
+            out.push(block);
+        }
+    }
+    out
+}
+
+fn dedupe_exact_chars_with_style(chars: Vec<(CharBBox, TextStyle)>) -> Vec<(CharBBox, TextStyle)> {
+    let mut seen: HashSet<CharKey> = HashSet::new();
+    let mut out = Vec::with_capacity(chars.len());
+    for (ch, style) in chars {
+        let key = (ch.page_index, ch.ch, rect_bits(ch.bbox));
+        if seen.insert(key) {
+            out.push((ch, style));
+        }
+    }
+    out
 }
 
 fn canonicalize_rect(rect: Rectangle, page_index: usize, layouts: &[PageLayout]) -> Rectangle {

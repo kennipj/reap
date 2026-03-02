@@ -1,5 +1,6 @@
 mod common;
 
+use std::collections::HashSet;
 use std::fs;
 
 use reap::model::Object;
@@ -127,6 +128,49 @@ fn header_phrase_reconstructs_from_words() {
         "failed to reconstruct expected header phrase; header tokens: {:?}",
         header_tokens
     );
+}
+
+#[test]
+fn overpaint_duplicate_labels_are_deduped_in_blocks() {
+    let blocks = load_words(&edge_pdf("edge_overpaint_duplicate_labels.pdf"));
+
+    let repeated_hits: Vec<_> = blocks
+        .iter()
+        .filter(|b| b.page_index == 0 && b.text == "OVERPAINT_LABEL")
+        .collect();
+    assert_eq!(
+        repeated_hits.len(),
+        1,
+        "expected exactly one OVERPAINT_LABEL token, got {}",
+        repeated_hits.len()
+    );
+
+    let unique_hits: Vec<_> = blocks
+        .iter()
+        .filter(|b| b.page_index == 0 && b.text == "UNIQUE_TOKEN")
+        .collect();
+    assert_eq!(
+        unique_hits.len(),
+        1,
+        "expected exactly one UNIQUE_TOKEN token, got {}",
+        unique_hits.len()
+    );
+
+    let rect_bits = |r: &Rectangle| {
+        let norm = |v: f64| if v == 0.0 { 0.0f64.to_bits() } else { v.to_bits() };
+        (norm(r.left), norm(r.top), norm(r.right), norm(r.bottom))
+    };
+    let mut seen = HashSet::new();
+    for b in &blocks {
+        let key = (b.page_index, b.text.clone(), rect_bits(&b.bbox));
+        assert!(
+            seen.insert(key),
+            "found duplicate block after dedupe: page={} text='{}' bbox={:?}",
+            b.page_index,
+            b.text,
+            b.bbox
+        );
+    }
 }
 
 #[test]
