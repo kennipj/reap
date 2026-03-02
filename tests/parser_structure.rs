@@ -79,3 +79,49 @@ fn artifact_tagged_text_is_included_in_blocks() {
         );
     }
 }
+
+#[test]
+fn tagged_invisible_text_is_included_but_artifact_invisible_text_is_excluded() {
+    let path = edge_pdf("edge_tagged_invisible_text.pdf");
+    let bytes = fs::read(&path).expect("failed to read edge tagged invisible fixture");
+    assert!(
+        bytes
+            .windows(b"/Artifact BMC".len())
+            .any(|w| w == b"/Artifact BMC"),
+        "expected /Artifact BMC marker in fixture bytes"
+    );
+    assert!(
+        bytes
+            .windows(b"/P <</MCID 0>> BDC".len())
+            .any(|w| w == b"/P <</MCID 0>> BDC"),
+        "expected tagged /P ... BDC marker in fixture bytes"
+    );
+    assert!(
+        bytes.windows(b"3 Tr".len()).any(|w| w == b"3 Tr"),
+        "expected invisible text render mode marker in fixture bytes"
+    );
+
+    let doc = load_doc(&path);
+    let blocks = extract_text_blocks(&doc);
+
+    assert!(
+        blocks.iter().any(|b| b.text == "VISIBLE_BASELINE"),
+        "expected visible control token to be extracted"
+    );
+    assert!(
+        blocks.iter().any(|b| b.text == "Tagged"),
+        "expected tagged invisible token 'Tagged' to be extracted"
+    );
+    assert!(
+        blocks.iter().any(|b| b.text == "hidden"),
+        "expected tagged invisible token 'hidden' to be extracted"
+    );
+    assert!(
+        blocks.iter().any(|b| b.text == "sample"),
+        "expected tagged invisible token 'sample' to be extracted"
+    );
+    assert!(
+        !blocks.iter().any(|b| b.text.contains("ARTIFACT_HIDDEN")),
+        "expected artifact-hidden invisible text to remain excluded"
+    );
+}
