@@ -167,6 +167,14 @@ impl Rectangle {
         (self.right - self.left).max(0.0) * (self.bottom - self.top).max(0.0)
     }
 
+    fn width(&self) -> f64 {
+        (self.right - self.left).max(0.0)
+    }
+
+    fn height(&self) -> f64 {
+        (self.bottom - self.top).max(0.0)
+    }
+
     fn pick_smallest_rect(rects: &[Rectangle]) -> Rectangle {
         let mut best = rects[0];
         for rect in &rects[1..] {
@@ -178,86 +186,141 @@ impl Rectangle {
         best
     }
 
+    fn pick_larger_rect(a: Rectangle, b: Rectangle) -> Rectangle {
+        let area_cmp = a.area().total_cmp(&b.area());
+        if area_cmp.is_gt() {
+            return a;
+        }
+        if area_cmp.is_lt() {
+            return b;
+        }
+
+        let width_cmp = a.width().total_cmp(&b.width());
+        if width_cmp.is_gt() {
+            return a;
+        }
+        if width_cmp.is_lt() {
+            return b;
+        }
+
+        let height_cmp = a.height().total_cmp(&b.height());
+        if height_cmp.is_gt() {
+            return a;
+        }
+        if height_cmp.is_lt() {
+            return b;
+        }
+
+        if a.state_key() <= b.state_key() { a } else { b }
+    }
+
+    fn has_mixed_axes(directions: &[ExpandDirection]) -> bool {
+        let has_vertical = directions
+            .iter()
+            .any(|d| matches!(d, ExpandDirection::Up | ExpandDirection::Down));
+        let has_horizontal = directions
+            .iter()
+            .any(|d| matches!(d, ExpandDirection::Left | ExpandDirection::Right));
+        has_vertical && has_horizontal
+    }
+
     fn expand_next_state(
         current: Rectangle,
         base: Rectangle,
         blockers: &[Rectangle],
         directions: &[ExpandDirection],
         max_bounds: Rectangle,
+        axis_order: AxisPassOrder,
     ) -> Rectangle {
         let mut next = current;
 
-        for direction in [ExpandDirection::Up, ExpandDirection::Down] {
-            if !directions.contains(&direction) {
-                continue;
-            }
-            match direction {
-                ExpandDirection::Up => {
-                    let candidate = blockers
-                        .iter()
-                        .filter(|blocker| {
-                            blocker.horizontal_overlap_with(&next) && blocker.bottom <= base.top
-                        })
-                        .map(|blocker| blocker.bottom)
-                        .max_by(|a, b| a.total_cmp(b))
-                        .unwrap_or(max_bounds.top);
-                    next.top = candidate.min(base.top).max(max_bounds.top);
+        let apply_vertical = |next: &mut Rectangle| {
+            for direction in [ExpandDirection::Up, ExpandDirection::Down] {
+                if !directions.contains(&direction) {
+                    continue;
                 }
-                ExpandDirection::Down => {
-                    let candidate = blockers
-                        .iter()
-                        .filter(|blocker| {
-                            blocker.horizontal_overlap_with(&next) && blocker.top >= base.bottom
-                        })
-                        .map(|blocker| blocker.top)
-                        .min_by(|a, b| a.total_cmp(b))
-                        .unwrap_or(max_bounds.bottom);
-                    next.bottom = candidate.max(base.bottom).min(max_bounds.bottom);
+                match direction {
+                    ExpandDirection::Up => {
+                        let candidate = blockers
+                            .iter()
+                            .filter(|blocker| {
+                                blocker.horizontal_overlap_with(next) && blocker.bottom <= base.top
+                            })
+                            .map(|blocker| blocker.bottom)
+                            .max_by(|a, b| a.total_cmp(b))
+                            .unwrap_or(max_bounds.top);
+                        next.top = candidate.min(base.top).max(max_bounds.top);
+                    }
+                    ExpandDirection::Down => {
+                        let candidate = blockers
+                            .iter()
+                            .filter(|blocker| {
+                                blocker.horizontal_overlap_with(next) && blocker.top >= base.bottom
+                            })
+                            .map(|blocker| blocker.top)
+                            .min_by(|a, b| a.total_cmp(b))
+                            .unwrap_or(max_bounds.bottom);
+                        next.bottom = candidate.max(base.bottom).min(max_bounds.bottom);
+                    }
+                    _ => {}
                 }
-                _ => {}
             }
-        }
+        };
 
-        for direction in [ExpandDirection::Left, ExpandDirection::Right] {
-            if !directions.contains(&direction) {
-                continue;
+        let apply_horizontal = |next: &mut Rectangle| {
+            for direction in [ExpandDirection::Left, ExpandDirection::Right] {
+                if !directions.contains(&direction) {
+                    continue;
+                }
+                match direction {
+                    ExpandDirection::Left => {
+                        let candidate = blockers
+                            .iter()
+                            .filter(|blocker| {
+                                blocker.vertical_overlap_with(next) && blocker.right <= base.left
+                            })
+                            .map(|blocker| blocker.right)
+                            .max_by(|a, b| a.total_cmp(b))
+                            .unwrap_or(max_bounds.left);
+                        next.left = candidate.min(base.left).max(max_bounds.left);
+                    }
+                    ExpandDirection::Right => {
+                        let candidate = blockers
+                            .iter()
+                            .filter(|blocker| {
+                                blocker.vertical_overlap_with(next) && blocker.left >= base.right
+                            })
+                            .map(|blocker| blocker.left)
+                            .min_by(|a, b| a.total_cmp(b))
+                            .unwrap_or(max_bounds.right);
+                        next.right = candidate.max(base.right).min(max_bounds.right);
+                    }
+                    _ => {}
+                }
             }
-            match direction {
-                ExpandDirection::Left => {
-                    let candidate = blockers
-                        .iter()
-                        .filter(|blocker| {
-                            blocker.vertical_overlap_with(&next) && blocker.right <= base.left
-                        })
-                        .map(|blocker| blocker.right)
-                        .max_by(|a, b| a.total_cmp(b))
-                        .unwrap_or(max_bounds.left);
-                    next.left = candidate.min(base.left).max(max_bounds.left);
-                }
-                ExpandDirection::Right => {
-                    let candidate = blockers
-                        .iter()
-                        .filter(|blocker| {
-                            blocker.vertical_overlap_with(&next) && blocker.left >= base.right
-                        })
-                        .map(|blocker| blocker.left)
-                        .min_by(|a, b| a.total_cmp(b))
-                        .unwrap_or(max_bounds.right);
-                    next.right = candidate.max(base.right).min(max_bounds.right);
-                }
-                _ => {}
+        };
+
+        match axis_order {
+            AxisPassOrder::VerticalThenHorizontal => {
+                apply_vertical(&mut next);
+                apply_horizontal(&mut next);
+            }
+            AxisPassOrder::HorizontalThenVertical => {
+                apply_horizontal(&mut next);
+                apply_vertical(&mut next);
             }
         }
 
         next
     }
 
-    fn expand_constrained_with_limit(
+    fn expand_constrained_with_limit_for_order(
         &self,
         blockers: &[Rectangle],
         directions: &[ExpandDirection],
         maximum_bounds: &Rectangle,
         max_iterations: usize,
+        axis_order: AxisPassOrder,
     ) -> Result<Rectangle, ExpandError> {
         if directions.is_empty() {
             return Err(ExpandError::EmptyDirections);
@@ -299,6 +362,7 @@ impl Rectangle {
                 &normalized_blockers,
                 directions,
                 max_bounds,
+                axis_order,
             );
             if next == current {
                 return Ok(next);
@@ -308,6 +372,43 @@ impl Rectangle {
 
         history.push(current);
         Ok(Rectangle::pick_smallest_rect(&history))
+    }
+
+    fn expand_constrained_with_limit(
+        &self,
+        blockers: &[Rectangle],
+        directions: &[ExpandDirection],
+        maximum_bounds: &Rectangle,
+        max_iterations: usize,
+    ) -> Result<Rectangle, ExpandError> {
+        if !Rectangle::has_mixed_axes(directions) {
+            return self.expand_constrained_with_limit_for_order(
+                blockers,
+                directions,
+                maximum_bounds,
+                max_iterations,
+                AxisPassOrder::VerticalThenHorizontal,
+            );
+        }
+
+        let vertical_first = self.expand_constrained_with_limit_for_order(
+            blockers,
+            directions,
+            maximum_bounds,
+            max_iterations,
+            AxisPassOrder::VerticalThenHorizontal,
+        )?;
+        let horizontal_first = self.expand_constrained_with_limit_for_order(
+            blockers,
+            directions,
+            maximum_bounds,
+            max_iterations,
+            AxisPassOrder::HorizontalThenVertical,
+        )?;
+        Ok(Rectangle::pick_larger_rect(
+            vertical_first,
+            horizontal_first,
+        ))
     }
 
     pub fn expand_constrained(
@@ -343,6 +444,12 @@ pub enum ExpandDirection {
     Down,
     Left,
     Right,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AxisPassOrder {
+    VerticalThenHorizontal,
+    HorizontalThenVertical,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4794,6 +4901,61 @@ mod tests {
             )
             .expect("max-iteration fallback should return smallest state");
         assert_eq!(expanded, base);
+    }
+
+    #[test]
+    fn expand_constrained_mixed_axes_selects_larger_area_from_dual_orders() {
+        let base = make_bbox_rect(10.0, 10.0, 20.0, 20.0);
+        let max_bounds = make_bbox_rect(0.0, 0.0, 100.0, 100.0);
+        let blockers = vec![
+            make_bbox_rect(0.0, 40.0, 24.0, 80.0),
+            make_bbox_rect(22.0, 30.0, 100.0, 80.0),
+            make_bbox_rect(60.0, 0.0, 100.0, 24.0),
+            make_bbox_rect(30.0, 26.0, 100.0, 100.0),
+        ];
+
+        let vertical_first = base
+            .expand_constrained_with_limit_for_order(
+                &blockers,
+                &[ExpandDirection::Right, ExpandDirection::Down],
+                &max_bounds,
+                256,
+                AxisPassOrder::VerticalThenHorizontal,
+            )
+            .expect("vertical-first solve should succeed");
+        let horizontal_first = base
+            .expand_constrained_with_limit_for_order(
+                &blockers,
+                &[ExpandDirection::Right, ExpandDirection::Down],
+                &max_bounds,
+                256,
+                AxisPassOrder::HorizontalThenVertical,
+            )
+            .expect("horizontal-first solve should succeed");
+
+        assert!(vertical_first.area() > horizontal_first.area());
+        let selected = base
+            .expand_constrained(
+                &blockers,
+                &[ExpandDirection::Right, ExpandDirection::Down],
+                &max_bounds,
+            )
+            .expect("dual-order solve should succeed");
+        assert_eq!(selected, vertical_first);
+    }
+
+    #[test]
+    fn expand_candidate_selection_tie_break_is_deterministic() {
+        let wide = make_bbox_rect(0.0, 0.0, 1.0, 4.0);
+        let tall = make_bbox_rect(0.0, 0.0, 4.0, 1.0);
+        assert_eq!(Rectangle::pick_larger_rect(wide, tall), wide);
+
+        let a = make_bbox_rect(0.0, 0.0, 2.0, 2.0);
+        let b = make_bbox_rect(0.0, 1.0, 2.0, 3.0);
+        assert_eq!(a.area(), b.area());
+        assert_eq!(a.width(), b.width());
+        assert_eq!(a.height(), b.height());
+        assert_eq!(Rectangle::pick_larger_rect(a, b), a);
     }
 
     #[test]
