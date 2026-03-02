@@ -393,7 +393,7 @@ struct RegexSearchIndex {
     pages: Vec<RegexPageIndex>,
 }
 
-const REGEX_LINE_VERTICAL_OVERLAP_THRESHOLD: f64 = 0.9;
+const REGEX_LINE_VERTICAL_OVERLAP_THRESHOLD: f64 = 0.8;
 
 impl TextBlockIndex {
     pub fn new(blocks: Vec<TextBlock>) -> Self {
