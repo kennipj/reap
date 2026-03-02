@@ -462,7 +462,7 @@ fn inline_image_termination_corrupt_xref_regression() {
     let doc = load_doc(&fixture);
     let blocks = extract_text_blocks(&doc);
 
-    for token in ["LONGVIEW", "WORLDGATE", "HERNDON", "20170"] {
+    for token in ["HELLO", "WORLD", "SAMPLE", "TEXT", "12345"] {
         assert!(
             blocks
                 .iter()
@@ -474,7 +474,7 @@ fn inline_image_termination_corrupt_xref_regression() {
 
     let has_key_id = blocks
         .iter()
-        .any(|b| b.page_index == 0 && b.text == "ID-KEY-7788");
+        .any(|b| b.page_index == 0 && b.text == "ID-KEY-1234");
     assert!(
         has_key_id,
         "expected key synthetic ID token on page 0 in inline-image termination fixture"
@@ -688,6 +688,238 @@ fn search_regex_does_not_span_pages() {
         .search_regex(r"alpha\s+beta")
         .expect("regex should compile");
     assert!(hits.is_empty(), "expected no cross-page matches");
+}
+
+#[test]
+fn search_regex_line_builder_separates_nearby_form_rows() {
+    let blocks = vec![
+        TextBlock {
+            page_index: 0,
+            text: "row1-left".to_string(),
+            bbox: Rectangle {
+                top: 10.0,
+                left: 10.0,
+                bottom: 20.0,
+                right: 30.0,
+            },
+        },
+        TextBlock {
+            page_index: 0,
+            text: "row1-right".to_string(),
+            bbox: Rectangle {
+                top: 10.0,
+                left: 40.0,
+                bottom: 20.0,
+                right: 60.0,
+            },
+        },
+        TextBlock {
+            page_index: 0,
+            text: "row2-left".to_string(),
+            bbox: Rectangle {
+                top: 14.0,
+                left: 20.0,
+                bottom: 24.0,
+                right: 36.0,
+            },
+        },
+        TextBlock {
+            page_index: 0,
+            text: "row2-right".to_string(),
+            bbox: Rectangle {
+                top: 14.0,
+                left: 50.0,
+                bottom: 24.0,
+                right: 66.0,
+            },
+        },
+    ];
+    let mut index = TextBlockIndex::new(blocks);
+    let full_text = index.text();
+    let lines: Vec<&str> = full_text.lines().collect();
+    assert_eq!(lines, vec!["row1-left row1-right", "row2-left row2-right"]);
+
+    let interleaved_hits = index
+        .search_regex(r"row1-left\s+row2-left\s+row1-right\s+row2-right")
+        .expect("regex should compile");
+    assert!(
+        interleaved_hits.is_empty(),
+        "expected no interleaved-row phrase match"
+    );
+
+    let row_hits = index
+        .search_regex(r"row1-left\s+row1-right")
+        .expect("regex should compile");
+    assert!(
+        !row_hits.is_empty(),
+        "expected row1 phrase to remain contiguous"
+    );
+}
+
+#[test]
+fn search_regex_line_builder_uses_directional_rtree_overlap() {
+    let blocks = vec![
+        TextBlock {
+            page_index: 0,
+            text: "short".to_string(),
+            bbox: Rectangle {
+                top: 10.0,
+                left: 10.0,
+                bottom: 12.0,
+                right: 18.0,
+            },
+        },
+        TextBlock {
+            page_index: 0,
+            text: "tall".to_string(),
+            bbox: Rectangle {
+                top: 10.0,
+                left: 20.0,
+                bottom: 20.0,
+                right: 32.0,
+            },
+        },
+    ];
+    let mut index = TextBlockIndex::new(blocks);
+    let full_text = index.text();
+    let lines: Vec<&str> = full_text.lines().collect();
+    assert_eq!(lines, vec!["short", "tall"]);
+
+    let hits = index
+        .search_regex(r"short\s+tall")
+        .expect("regex should compile");
+    assert!(
+        !hits.is_empty(),
+        "expected regex to still match across newline whitespace"
+    );
+}
+
+#[test]
+fn search_regex_line_builder_consumes_all_blocks_once() {
+    let blocks = vec![
+        TextBlock {
+            page_index: 0,
+            text: "b2".to_string(),
+            bbox: Rectangle {
+                top: 14.0,
+                left: 50.0,
+                bottom: 24.0,
+                right: 64.0,
+            },
+        },
+        TextBlock {
+            page_index: 0,
+            text: "a1".to_string(),
+            bbox: Rectangle {
+                top: 10.0,
+                left: 10.0,
+                bottom: 20.0,
+                right: 20.0,
+            },
+        },
+        TextBlock {
+            page_index: 0,
+            text: "c1".to_string(),
+            bbox: Rectangle {
+                top: 30.0,
+                left: 15.0,
+                bottom: 40.0,
+                right: 25.0,
+            },
+        },
+        TextBlock {
+            page_index: 0,
+            text: "a3".to_string(),
+            bbox: Rectangle {
+                top: 10.0,
+                left: 70.0,
+                bottom: 20.0,
+                right: 80.0,
+            },
+        },
+        TextBlock {
+            page_index: 0,
+            text: "b1".to_string(),
+            bbox: Rectangle {
+                top: 14.0,
+                left: 20.0,
+                bottom: 24.0,
+                right: 34.0,
+            },
+        },
+        TextBlock {
+            page_index: 0,
+            text: "a2".to_string(),
+            bbox: Rectangle {
+                top: 10.0,
+                left: 40.0,
+                bottom: 20.0,
+                right: 50.0,
+            },
+        },
+    ];
+    let index = TextBlockIndex::new(blocks);
+    let text = index.text();
+
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines, vec!["a1 a2 a3", "b1 b2", "c1"]);
+
+    let tokens: Vec<&str> = text.split_whitespace().collect();
+    assert_eq!(tokens.len(), 6, "expected each block text exactly once");
+    for expected in ["a1", "a2", "a3", "b1", "b2", "c1"] {
+        let count = tokens.iter().filter(|&&token| token == expected).count();
+        assert_eq!(count, 1, "expected '{}' exactly once", expected);
+    }
+}
+
+#[test]
+fn search_regex_line_builder_sorts_lines_and_blocks_deterministically() {
+    let blocks = vec![
+        TextBlock {
+            page_index: 0,
+            text: "L2B".to_string(),
+            bbox: Rectangle {
+                top: 30.0,
+                left: 20.0,
+                bottom: 40.0,
+                right: 30.0,
+            },
+        },
+        TextBlock {
+            page_index: 0,
+            text: "L1B".to_string(),
+            bbox: Rectangle {
+                top: 10.0,
+                left: 20.0,
+                bottom: 20.0,
+                right: 30.0,
+            },
+        },
+        TextBlock {
+            page_index: 0,
+            text: "L1A".to_string(),
+            bbox: Rectangle {
+                top: 10.0,
+                left: 10.0,
+                bottom: 20.0,
+                right: 18.0,
+            },
+        },
+        TextBlock {
+            page_index: 0,
+            text: "L2A".to_string(),
+            bbox: Rectangle {
+                top: 30.0,
+                left: 10.0,
+                bottom: 40.0,
+                right: 18.0,
+            },
+        },
+    ];
+    let index = TextBlockIndex::new(blocks);
+    let text = index.text();
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines, vec!["L1A L1B", "L2A L2B"]);
 }
 
 #[test]

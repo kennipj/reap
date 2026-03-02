@@ -512,6 +512,40 @@ struct PaintedFill {
     bg_luminance: Option<f64>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MarkedContentScope {
+    Artifact,
+    TaggedNonArtifact,
+    Other,
+}
+
+fn marked_content_scope_from_operands(operands: &[Object]) -> MarkedContentScope {
+    match operands.first().and_then(|operand| operand.as_name()) {
+        Some("Artifact") => MarkedContentScope::Artifact,
+        Some(_) => MarkedContentScope::TaggedNonArtifact,
+        None => MarkedContentScope::Other,
+    }
+}
+
+fn allow_invisible_tagged_text(
+    text_state: &TextState,
+    marked_content_stack: &[MarkedContentScope],
+) -> bool {
+    let mode = text_state.render_mode.rem_euclid(8);
+    if mode != 3 && mode != 7 {
+        return false;
+    }
+    let in_artifact_scope = marked_content_stack
+        .iter()
+        .any(|scope| *scope == MarkedContentScope::Artifact);
+    if in_artifact_scope {
+        return false;
+    }
+    marked_content_stack
+        .iter()
+        .any(|scope| *scope == MarkedContentScope::TaggedNonArtifact)
+}
+
 impl Rect {
     fn from_points(points: &[(f64, f64)]) -> Option<Self> {
         if points.is_empty() {
@@ -982,6 +1016,7 @@ fn process_content_impl<C, F>(
             &Matrix,
             Option<Rect>,
             &[PaintedFill],
+            bool,
             &[u8],
             &mut C,
         ) + Copy,
@@ -993,6 +1028,7 @@ fn process_content_impl<C, F>(
     let mut current_clip: Option<Rect> = None;
     let mut path_points: Vec<(f64, f64)> = Vec::new();
     let mut path_bbox: Option<Rect> = None;
+    let mut marked_content_stack: Vec<MarkedContentScope> = Vec::new();
     let mut tokenizer = ContentTokenizer::new(content_bytes);
     let mut operands: Vec<Object> = Vec::with_capacity(8);
     let font_map_key = resources.map_or(0usize, |r| r as *const Object as usize);
@@ -1033,8 +1069,12 @@ fn process_content_impl<C, F>(
                     text_state.fill_color_space = ColorSpaceKind::DeviceCmyk;
                 }
             }
-            "BMC" | "BDC" => {}
-            "EMC" => {}
+            "BMC" | "BDC" => {
+                marked_content_stack.push(marked_content_scope_from_operands(&operands));
+            }
+            "EMC" => {
+                let _ = marked_content_stack.pop();
+            }
             "q" => {
                 ctm_stack.push(ctm);
                 state_stack.push(text_state.clone());
@@ -1282,6 +1322,8 @@ fn process_content_impl<C, F>(
                     text_state.line_matrix.multiply(Matrix::translate(0.0, ty));
                 text_state.text_matrix = text_state.line_matrix;
                 if let Some(Object::String(bytes)) = operands.get(0) {
+                    let allow_invisible =
+                        allow_invisible_tagged_text(&text_state, &marked_content_stack);
                     emit_text(
                         page_index,
                         font_map.as_ref(),
@@ -1289,6 +1331,7 @@ fn process_content_impl<C, F>(
                         &ctm,
                         current_clip,
                         painted_fills,
+                        allow_invisible,
                         bytes,
                         out,
                     );
@@ -1303,6 +1346,8 @@ fn process_content_impl<C, F>(
                         text_state.line_matrix.multiply(Matrix::translate(0.0, ty));
                     text_state.text_matrix = text_state.line_matrix;
                     if let Some(Object::String(bytes)) = operands.get(2) {
+                        let allow_invisible =
+                            allow_invisible_tagged_text(&text_state, &marked_content_stack);
                         emit_text(
                             page_index,
                             font_map.as_ref(),
@@ -1310,6 +1355,7 @@ fn process_content_impl<C, F>(
                             &ctm,
                             current_clip,
                             painted_fills,
+                            allow_invisible,
                             bytes,
                             out,
                         );
@@ -1318,6 +1364,8 @@ fn process_content_impl<C, F>(
             }
             "Tj" => {
                 if let Some(Object::String(bytes)) = operands.get(0) {
+                    let allow_invisible =
+                        allow_invisible_tagged_text(&text_state, &marked_content_stack);
                     emit_text(
                         page_index,
                         font_map.as_ref(),
@@ -1325,6 +1373,7 @@ fn process_content_impl<C, F>(
                         &ctm,
                         current_clip,
                         painted_fills,
+                        allow_invisible,
                         bytes,
                         out,
                     );
@@ -1335,6 +1384,8 @@ fn process_content_impl<C, F>(
                     for item in items {
                         match item {
                             Object::String(bytes) => {
+                                let allow_invisible =
+                                    allow_invisible_tagged_text(&text_state, &marked_content_stack);
                                 emit_text(
                                     page_index,
                                     font_map.as_ref(),
@@ -1342,6 +1393,7 @@ fn process_content_impl<C, F>(
                                     &ctm,
                                     current_clip,
                                     painted_fills,
+                                    allow_invisible,
                                     bytes,
                                     out,
                                 );
@@ -1712,6 +1764,7 @@ fn show_text_impl<C, F>(
     ctm: &Matrix,
     clip: Option<Rect>,
     painted_fills: &[PaintedFill],
+    allow_invisible_tagged_text: bool,
     bytes: &[u8],
     out: &mut C,
     mut push: F,
@@ -1726,7 +1779,7 @@ fn show_text_impl<C, F>(
         Some(v) => v,
         None => return,
     };
-    if !text_has_paint(text_state) {
+    if !allow_invisible_tagged_text && !text_has_paint(text_state) {
         return;
     }
     let mode = text_state.render_mode.rem_euclid(8);
@@ -1851,6 +1904,7 @@ fn show_text(
     ctm: &Matrix,
     clip: Option<Rect>,
     painted_fills: &[PaintedFill],
+    allow_invisible_tagged_text: bool,
     bytes: &[u8],
     out: &mut Vec<CharBBox>,
 ) {
@@ -1861,6 +1915,7 @@ fn show_text(
         ctm,
         clip,
         painted_fills,
+        allow_invisible_tagged_text,
         bytes,
         out,
         |char_box, out| {
@@ -1876,6 +1931,7 @@ fn show_text_with_style(
     ctm: &Matrix,
     clip: Option<Rect>,
     painted_fills: &[PaintedFill],
+    allow_invisible_tagged_text: bool,
     bytes: &[u8],
     out: &mut Vec<(CharBBox, TextStyle)>,
 ) {
@@ -1891,6 +1947,7 @@ fn show_text_with_style(
         ctm,
         clip,
         painted_fills,
+        allow_invisible_tagged_text,
         bytes,
         out,
         |char_box, out| out.push((char_box, style.clone())),
@@ -1904,6 +1961,7 @@ fn show_text_for_block_accumulator(
     ctm: &Matrix,
     clip: Option<Rect>,
     painted_fills: &[PaintedFill],
+    allow_invisible_tagged_text: bool,
     bytes: &[u8],
     out: &mut BlockAccumulator,
 ) {
@@ -1915,6 +1973,7 @@ fn show_text_for_block_accumulator(
         ctm,
         clip,
         painted_fills,
+        allow_invisible_tagged_text,
         bytes,
         out,
         |char_box, out| {

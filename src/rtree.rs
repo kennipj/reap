@@ -393,6 +393,8 @@ struct RegexSearchIndex {
     pages: Vec<RegexPageIndex>,
 }
 
+const REGEX_LINE_VERTICAL_OVERLAP_THRESHOLD: f64 = 0.9;
+
 impl TextBlockIndex {
     pub fn new(blocks: Vec<TextBlock>) -> Self {
         Self::from_parts(blocks)
@@ -1083,16 +1085,7 @@ fn build_regex_index(blocks: &[TextBlock]) -> RegexSearchIndex {
 
     let mut pages: Vec<RegexPageIndex> = Vec::with_capacity(page_ids.len());
     for page_id in page_ids {
-        let mut block_indices = per_page.remove(&page_id).unwrap_or_default();
-        block_indices.sort_by(|&a, &b| {
-            let ba = &blocks[a];
-            let bb = &blocks[b];
-            ba.bbox
-                .top
-                .total_cmp(&bb.bbox.top)
-                .then_with(|| ba.bbox.left.total_cmp(&bb.bbox.left))
-                .then_with(|| ba.bbox.right.total_cmp(&bb.bbox.right))
-        });
+        let block_indices = per_page.remove(&page_id).unwrap_or_default();
         let lines = cluster_block_indices_into_lines(blocks, &block_indices);
         let (body, spans) = build_page_body(blocks, &lines);
         pages.push(RegexPageIndex { body, spans });
@@ -1103,51 +1096,85 @@ fn build_regex_index(blocks: &[TextBlock]) -> RegexSearchIndex {
 
 fn cluster_block_indices_into_lines(
     blocks: &[TextBlock],
-    sorted_block_indices: &[usize],
+    page_block_indices: &[usize],
 ) -> Vec<Vec<usize>> {
-    let mut lines: Vec<Vec<usize>> = Vec::new();
-    let mut current_line: Vec<usize> = Vec::new();
+    if page_block_indices.is_empty() {
+        return Vec::new();
+    }
 
-    for &block_index in sorted_block_indices {
-        let block = &blocks[block_index];
-        if current_line.is_empty() {
-            current_line.push(block_index);
-            continue;
+    let mut local_to_global: Vec<usize> = Vec::with_capacity(page_block_indices.len());
+    let mut local_rects: Vec<RectF> = Vec::with_capacity(page_block_indices.len());
+    let mut page_min_x = f64::INFINITY;
+    let mut page_max_x = f64::NEG_INFINITY;
+
+    for &global_index in page_block_indices {
+        let block = &blocks[global_index];
+        let left = block.bbox.left.min(block.bbox.right);
+        let right = block.bbox.left.max(block.bbox.right);
+        let top = block.bbox.top.min(block.bbox.bottom);
+        let bottom = block.bbox.top.max(block.bbox.bottom);
+        page_min_x = page_min_x.min(left);
+        page_max_x = page_max_x.max(right);
+        local_to_global.push(global_index);
+        local_rects.push(RectF::from_ltrb(left, top, right, bottom));
+    }
+
+    let local_tree = RTree::build(&local_rects, 16);
+    let mut remaining_local: Vec<usize> = (0..local_to_global.len()).collect();
+    let mut active_local: Vec<bool> = vec![true; local_to_global.len()];
+    let mut grouped_lines: Vec<(f64, f64, Vec<usize>)> = Vec::new();
+
+    while let Some(&seed_local) = remaining_local.first() {
+        let seed_global = local_to_global[seed_local];
+        let seed_block = &blocks[seed_global];
+        let (seed_top, seed_bottom) = normalized_vertical_span(seed_block.bbox);
+        let query = RectF::from_ltrb(page_min_x, seed_top, page_max_x, seed_bottom);
+
+        let mut selected_local: Vec<usize> = local_tree
+            .search(&local_rects, &query, REGEX_LINE_VERTICAL_OVERLAP_THRESHOLD)
+            .into_iter()
+            .filter(|idx| active_local[*idx])
+            .collect();
+
+        if selected_local.is_empty() {
+            selected_local.push(seed_local);
         }
 
-        if blocks[current_line[0]]
-            .bbox
-            .vertical_overlap(&block.bbox, 0.5)
-        {
-            current_line.push(block_index);
-            continue;
-        }
-
-        current_line.sort_by(|&a, &b| {
+        let mut line_indices: Vec<usize> = selected_local
+            .iter()
+            .map(|&local_index| local_to_global[local_index])
+            .collect();
+        line_indices.sort_by(|&a, &b| {
             let ba = &blocks[a];
             let bb = &blocks[b];
             ba.bbox
                 .left
                 .total_cmp(&bb.bbox.left)
                 .then_with(|| ba.bbox.top.total_cmp(&bb.bbox.top))
+                .then_with(|| ba.bbox.right.total_cmp(&bb.bbox.right))
         });
-        lines.push(current_line);
-        current_line = vec![block_index];
+
+        let mut line_top = f64::INFINITY;
+        let mut line_left = f64::INFINITY;
+        for &global_index in &line_indices {
+            let block = &blocks[global_index];
+            line_top = line_top.min(block.bbox.top.min(block.bbox.bottom));
+            line_left = line_left.min(block.bbox.left.min(block.bbox.right));
+        }
+        grouped_lines.push((line_top, line_left, line_indices));
+
+        for &local_index in &selected_local {
+            active_local[local_index] = false;
+        }
+        remaining_local.retain(|idx| active_local[*idx]);
     }
 
-    if !current_line.is_empty() {
-        current_line.sort_by(|&a, &b| {
-            let ba = &blocks[a];
-            let bb = &blocks[b];
-            ba.bbox
-                .left
-                .total_cmp(&bb.bbox.left)
-                .then_with(|| ba.bbox.top.total_cmp(&bb.bbox.top))
-        });
-        lines.push(current_line);
-    }
+    grouped_lines.sort_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.total_cmp(&b.1)));
+    grouped_lines.into_iter().map(|(_, _, line)| line).collect()
+}
 
-    lines
+fn normalized_vertical_span(rect: Rectangle) -> (f64, f64) {
+    (rect.top.min(rect.bottom), rect.top.max(rect.bottom))
 }
 
 fn build_page_body(blocks: &[TextBlock], lines: &[Vec<usize>]) -> (String, Vec<WordSpan>) {
