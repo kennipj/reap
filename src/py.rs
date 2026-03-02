@@ -51,13 +51,6 @@ impl Rectangle {
             right: right.unwrap_or(self.right),
         }
     }
-
-    fn __eq__(&self, other: &Rectangle) -> bool {
-        self.top == other.top
-            && self.left == other.left
-            && self.bottom == other.bottom
-            && self.right == other.right
-    }
 }
 
 #[pyclass]
@@ -270,6 +263,13 @@ impl Rectangle {
             "Rectangle(top={}, left={}, bottom={}, right={})",
             self.top, self.left, self.bottom, self.right
         )
+    }
+
+    fn __eq__(&self, other: &Rectangle) -> bool {
+        self.top == other.top
+            && self.left == other.left
+            && self.bottom == other.bottom
+            && self.right == other.right
     }
 }
 
