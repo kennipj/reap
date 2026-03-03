@@ -247,7 +247,7 @@ pub struct TextBlockIndex {
     cache: LruCache,
     regex_cache: RegexLruCache,
     regex_indices_cache: RegexIndicesLruCache,
-    regex_index: RegexSearchIndex,
+    regex_index: OnceLock<RegexSearchIndex>,
     doc_rect: Rectangle,
 }
 
@@ -402,7 +402,6 @@ impl TextBlockIndex {
     }
 
     fn from_parts(blocks: Vec<TextBlock>) -> Self {
-        let regex_index = build_regex_index(&blocks);
         let rects: Vec<RectF> = blocks
             .iter()
             .map(|b| RectF {
@@ -421,7 +420,7 @@ impl TextBlockIndex {
             cache: LruCache::new(1024),
             regex_cache: RegexLruCache::new(128),
             regex_indices_cache: RegexIndicesLruCache::new(128),
-            regex_index,
+            regex_index: OnceLock::new(),
             doc_rect,
         }
     }
@@ -481,8 +480,9 @@ impl TextBlockIndex {
     }
 
     pub fn text(&self) -> String {
+        let regex_index = self.ensure_regex_index();
         let mut out = String::new();
-        for page in &self.regex_index.pages {
+        for page in &regex_index.pages {
             out.push_str(&page.body);
             out.push('\n');
         }
@@ -505,6 +505,25 @@ impl TextBlockIndex {
         Ok(out)
     }
 
+    pub fn search_regex_exists(&mut self, pattern: &str) -> Result<bool, RegexSearchError> {
+        if let Some(cached) = self.regex_indices_cache.get(pattern) {
+            return Ok(!cached.is_empty());
+        }
+
+        let regex_index = self.ensure_regex_index();
+        let regex = compiled_regex(pattern).map_err(RegexSearchError::InvalidPattern)?;
+        for page in &regex_index.pages {
+            if regex.is_match(&page.body) {
+                return Ok(true);
+            }
+        }
+
+        // Cache misses to avoid rescanning the document for repeated existence checks.
+        self.regex_indices_cache
+            .insert(pattern.to_string(), Vec::new());
+        Ok(false)
+    }
+
     pub fn search_regex_indices(
         &mut self,
         pattern: &str,
@@ -513,9 +532,10 @@ impl TextBlockIndex {
             return Ok(cached);
         }
 
+        let regex_index = self.ensure_regex_index();
         let regex = compiled_regex(pattern).map_err(RegexSearchError::InvalidPattern)?;
         let mut out: Vec<Vec<usize>> = Vec::new();
-        for page in &self.regex_index.pages {
+        for page in &regex_index.pages {
             for mat in regex.find_iter(&page.body) {
                 if mat.start() >= mat.end() {
                     continue;
@@ -540,6 +560,11 @@ impl TextBlockIndex {
         let overlap = overlap.clamp(0.0, 1.0);
         let query = RectF::from_ltrb(rect.left, rect.top, rect.right, rect.bottom);
         self.rtree.search(&self.rects, &query, overlap)
+    }
+
+    fn ensure_regex_index(&self) -> &RegexSearchIndex {
+        self.regex_index
+            .get_or_init(|| build_regex_index(&self.blocks))
     }
 }
 
@@ -1103,55 +1128,104 @@ fn cluster_block_indices_into_lines(
         return Vec::new();
     }
 
-    let mut local_to_global: Vec<usize> = Vec::with_capacity(page_block_indices.len());
-    let mut local_rects: Vec<RectF> = Vec::with_capacity(page_block_indices.len());
-    let mut page_min_x = f64::INFINITY;
-    let mut page_max_x = f64::NEG_INFINITY;
+    #[derive(Clone, Copy)]
+    struct LineEntry {
+        index: usize,
+        top: f64,
+        bottom: f64,
+        left: f64,
+        right: f64,
+        height: f64,
+    }
 
+    #[derive(Debug)]
+    struct LineState {
+        anchor_top: f64,
+        anchor_bottom: f64,
+        anchor_height: f64,
+        line_top: f64,
+        line_left: f64,
+        indices: Vec<usize>,
+    }
+
+    let mut entries: Vec<LineEntry> = Vec::with_capacity(page_block_indices.len());
     for &global_index in page_block_indices {
         let block = &blocks[global_index];
         let left = block.bbox.left.min(block.bbox.right);
         let right = block.bbox.left.max(block.bbox.right);
         let top = block.bbox.top.min(block.bbox.bottom);
         let bottom = block.bbox.top.max(block.bbox.bottom);
-        page_min_x = page_min_x.min(left);
-        page_max_x = page_max_x.max(right);
-        local_to_global.push(global_index);
-        local_rects.push(RectF::from_ltrb(left, top, right, bottom));
+        let height = (bottom - top).abs();
+        entries.push(LineEntry {
+            index: global_index,
+            top,
+            bottom,
+            left,
+            right,
+            height,
+        });
     }
 
-    let local_tree = RTree::build(&local_rects, 16);
-    let mut remaining_local: Vec<usize> = (0..local_to_global.len()).collect();
-    let mut active_local: Vec<bool> = vec![true; local_to_global.len()];
-    let mut grouped_lines: Vec<(f64, f64, Vec<usize>)> = Vec::new();
+    entries.sort_by(|a, b| {
+        a.top
+            .total_cmp(&b.top)
+            .then_with(|| a.left.total_cmp(&b.left))
+            .then_with(|| a.right.total_cmp(&b.right))
+            .then_with(|| a.index.cmp(&b.index))
+    });
 
-    while let Some(&seed_local) = remaining_local.first() {
-        let seed_global = local_to_global[seed_local];
-        let seed_block = &blocks[seed_global];
-        let (seed_top, seed_bottom) = normalized_vertical_span(seed_block.bbox);
-        let query = RectF::from_ltrb(page_min_x, seed_top, page_max_x, seed_bottom);
+    let mut lines: Vec<LineState> = Vec::new();
+    for entry in entries {
+        let mut best_line: Option<(usize, f64, f64)> = None;
+        for (line_idx, line) in lines.iter().enumerate() {
+            let overlap_top = line.anchor_top.max(entry.top);
+            let overlap_bottom = line.anchor_bottom.min(entry.bottom);
+            let overlap = (overlap_bottom - overlap_top).max(0.0);
+            if overlap <= 0.0 || entry.height <= 0.0 {
+                continue;
+            }
 
-        let mut selected_local: Vec<usize> = local_tree
-            .search(&local_rects, &query, REGEX_LINE_VERTICAL_OVERLAP_THRESHOLD)
-            .into_iter()
-            .filter(|idx| active_local[*idx])
-            .collect();
+            let overlap_ratio = overlap / entry.height;
+            if overlap_ratio < REGEX_LINE_VERTICAL_OVERLAP_THRESHOLD {
+                continue;
+            }
+            if line.anchor_height > (entry.height * REGEX_LINE_HEIGHT_RATIO_LIMIT) {
+                continue;
+            }
 
-        let seed_height = rect_height(local_rects[seed_local]);
-        selected_local.retain(|&candidate_local| {
-            let candidate_height = rect_height(local_rects[candidate_local]);
-            seed_height <= (candidate_height * REGEX_LINE_HEIGHT_RATIO_LIMIT)
-        });
-
-        if selected_local.is_empty() {
-            selected_local.push(seed_local);
+            let top_distance = (line.anchor_top - entry.top).abs();
+            match best_line {
+                Some((_, best_ratio, best_distance)) => {
+                    let better_ratio = overlap_ratio > best_ratio;
+                    let better_distance =
+                        overlap_ratio == best_ratio && top_distance < best_distance;
+                    if better_ratio || better_distance {
+                        best_line = Some((line_idx, overlap_ratio, top_distance));
+                    }
+                }
+                None => best_line = Some((line_idx, overlap_ratio, top_distance)),
+            }
         }
 
-        let mut line_indices: Vec<usize> = selected_local
-            .iter()
-            .map(|&local_index| local_to_global[local_index])
-            .collect();
-        line_indices.sort_by(|&a, &b| {
+        if let Some((line_idx, _, _)) = best_line {
+            let line = &mut lines[line_idx];
+            line.indices.push(entry.index);
+            line.line_top = line.line_top.min(entry.top);
+            line.line_left = line.line_left.min(entry.left);
+        } else {
+            lines.push(LineState {
+                anchor_top: entry.top,
+                anchor_bottom: entry.bottom,
+                anchor_height: entry.height,
+                line_top: entry.top,
+                line_left: entry.left,
+                indices: vec![entry.index],
+            });
+        }
+    }
+
+    for line in &mut lines {
+        line.indices.sort_by(|&a, &b| {
             let ba = &blocks[a];
             let bb = &blocks[b];
             ba.bbox
@@ -1159,33 +1233,15 @@ fn cluster_block_indices_into_lines(
                 .total_cmp(&bb.bbox.left)
                 .then_with(|| ba.bbox.top.total_cmp(&bb.bbox.top))
                 .then_with(|| ba.bbox.right.total_cmp(&bb.bbox.right))
+                .then_with(|| a.cmp(&b))
         });
-
-        let mut line_top = f64::INFINITY;
-        let mut line_left = f64::INFINITY;
-        for &global_index in &line_indices {
-            let block = &blocks[global_index];
-            line_top = line_top.min(block.bbox.top.min(block.bbox.bottom));
-            line_left = line_left.min(block.bbox.left.min(block.bbox.right));
-        }
-        grouped_lines.push((line_top, line_left, line_indices));
-
-        for &local_index in &selected_local {
-            active_local[local_index] = false;
-        }
-        remaining_local.retain(|idx| active_local[*idx]);
     }
-
-    grouped_lines.sort_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.total_cmp(&b.1)));
-    grouped_lines.into_iter().map(|(_, _, line)| line).collect()
-}
-
-fn normalized_vertical_span(rect: Rectangle) -> (f64, f64) {
-    (rect.top.min(rect.bottom), rect.top.max(rect.bottom))
-}
-
-fn rect_height(rect: RectF) -> f64 {
-    (rect.max_y - rect.min_y).abs()
+    lines.sort_by(|a, b| {
+        a.line_top
+            .total_cmp(&b.line_top)
+            .then_with(|| a.line_left.total_cmp(&b.line_left))
+    });
+    lines.into_iter().map(|line| line.indices).collect()
 }
 
 fn build_page_body(blocks: &[TextBlock], lines: &[Vec<usize>]) -> (String, Vec<WordSpan>) {

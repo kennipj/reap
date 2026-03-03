@@ -7,12 +7,262 @@ pub enum Token {
     String(Vec<u8>),
     HexString(Vec<u8>),
     Name(String),
-    Keyword(String),
+    Keyword(Keyword),
 
     DictStart,
     DictEnd,
     ArrayStart,
     ArrayEnd,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum Keyword {
+    Obj,
+    EndObj,
+    Stream,
+    EndStream,
+    Trailer,
+    Ref,
+    Opq,
+    OpQ,
+    OpCm,
+    OpW,
+    OpJ,
+    Opj,
+    OpM,
+    Opd,
+    Opri,
+    Opi,
+    Opgs,
+    Opm,
+    Opl,
+    Opc,
+    Opv,
+    Opy,
+    Oph,
+    Opre,
+    OpS,
+    Ops,
+    Opf,
+    OpF,
+    OpfStar,
+    OpB,
+    OpBStar,
+    Opb,
+    OpbStar,
+    Opn,
+    OpWClip,
+    OpWClipStar,
+    OpCS,
+    Opcs,
+    OpSC,
+    OpSCN,
+    Opsc,
+    Opscn,
+    OpG,
+    Opg,
+    OpRG,
+    Oprg,
+    OpK,
+    Opk,
+    Opsh,
+    OpBT,
+    OpET,
+    OpTc,
+    OpTw,
+    OpTz,
+    OpTL,
+    OpTf,
+    OpTr,
+    OpTs,
+    OpTd,
+    OpTD,
+    OpTm,
+    OpTStar,
+    OpTj,
+    OpTJ,
+    OpApostrophe,
+    OpQuote,
+    Opd0,
+    Opd1,
+    OpBI,
+    OpID,
+    OpEI,
+    OpMP,
+    OpDP,
+    OpBMC,
+    OpBDC,
+    OpEMC,
+    OpBX,
+    OpEX,
+    OpDo,
+    Other(String),
+}
+
+impl Keyword {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Keyword::Obj => "obj",
+            Keyword::EndObj => "endobj",
+            Keyword::Stream => "stream",
+            Keyword::EndStream => "endstream",
+            Keyword::Trailer => "trailer",
+            Keyword::Ref => "R",
+            Keyword::Opq => "q",
+            Keyword::OpQ => "Q",
+            Keyword::OpCm => "cm",
+            Keyword::OpW => "w",
+            Keyword::OpJ => "J",
+            Keyword::Opj => "j",
+            Keyword::OpM => "M",
+            Keyword::Opd => "d",
+            Keyword::Opri => "ri",
+            Keyword::Opi => "i",
+            Keyword::Opgs => "gs",
+            Keyword::Opm => "m",
+            Keyword::Opl => "l",
+            Keyword::Opc => "c",
+            Keyword::Opv => "v",
+            Keyword::Opy => "y",
+            Keyword::Oph => "h",
+            Keyword::Opre => "re",
+            Keyword::OpS => "S",
+            Keyword::Ops => "s",
+            Keyword::Opf => "f",
+            Keyword::OpF => "F",
+            Keyword::OpfStar => "f*",
+            Keyword::OpB => "B",
+            Keyword::OpBStar => "B*",
+            Keyword::Opb => "b",
+            Keyword::OpbStar => "b*",
+            Keyword::Opn => "n",
+            Keyword::OpWClip => "W",
+            Keyword::OpWClipStar => "W*",
+            Keyword::OpCS => "CS",
+            Keyword::Opcs => "cs",
+            Keyword::OpSC => "SC",
+            Keyword::OpSCN => "SCN",
+            Keyword::Opsc => "sc",
+            Keyword::Opscn => "scn",
+            Keyword::OpG => "G",
+            Keyword::Opg => "g",
+            Keyword::OpRG => "RG",
+            Keyword::Oprg => "rg",
+            Keyword::OpK => "K",
+            Keyword::Opk => "k",
+            Keyword::Opsh => "sh",
+            Keyword::OpBT => "BT",
+            Keyword::OpET => "ET",
+            Keyword::OpTc => "Tc",
+            Keyword::OpTw => "Tw",
+            Keyword::OpTz => "Tz",
+            Keyword::OpTL => "TL",
+            Keyword::OpTf => "Tf",
+            Keyword::OpTr => "Tr",
+            Keyword::OpTs => "Ts",
+            Keyword::OpTd => "Td",
+            Keyword::OpTD => "TD",
+            Keyword::OpTm => "Tm",
+            Keyword::OpTStar => "T*",
+            Keyword::OpTj => "Tj",
+            Keyword::OpTJ => "TJ",
+            Keyword::OpApostrophe => "'",
+            Keyword::OpQuote => "\"",
+            Keyword::Opd0 => "d0",
+            Keyword::Opd1 => "d1",
+            Keyword::OpBI => "BI",
+            Keyword::OpID => "ID",
+            Keyword::OpEI => "EI",
+            Keyword::OpMP => "MP",
+            Keyword::OpDP => "DP",
+            Keyword::OpBMC => "BMC",
+            Keyword::OpBDC => "BDC",
+            Keyword::OpEMC => "EMC",
+            Keyword::OpBX => "BX",
+            Keyword::OpEX => "EX",
+            Keyword::OpDo => "Do",
+            Keyword::Other(v) => v.as_str(),
+        }
+    }
+
+    pub fn is_content_stream_operator(&self) -> bool {
+        matches!(
+            self,
+            Keyword::Opq
+                | Keyword::OpQ
+                | Keyword::OpCm
+                | Keyword::OpW
+                | Keyword::OpJ
+                | Keyword::Opj
+                | Keyword::OpM
+                | Keyword::Opd
+                | Keyword::Opri
+                | Keyword::Opi
+                | Keyword::Opgs
+                | Keyword::Opm
+                | Keyword::Opl
+                | Keyword::Opc
+                | Keyword::Opv
+                | Keyword::Opy
+                | Keyword::Oph
+                | Keyword::Opre
+                | Keyword::OpS
+                | Keyword::Ops
+                | Keyword::Opf
+                | Keyword::OpF
+                | Keyword::OpfStar
+                | Keyword::OpB
+                | Keyword::OpBStar
+                | Keyword::Opb
+                | Keyword::OpbStar
+                | Keyword::Opn
+                | Keyword::OpWClip
+                | Keyword::OpWClipStar
+                | Keyword::OpCS
+                | Keyword::Opcs
+                | Keyword::OpSC
+                | Keyword::OpSCN
+                | Keyword::Opsc
+                | Keyword::Opscn
+                | Keyword::OpG
+                | Keyword::Opg
+                | Keyword::OpRG
+                | Keyword::Oprg
+                | Keyword::OpK
+                | Keyword::Opk
+                | Keyword::Opsh
+                | Keyword::OpBT
+                | Keyword::OpET
+                | Keyword::OpTc
+                | Keyword::OpTw
+                | Keyword::OpTz
+                | Keyword::OpTL
+                | Keyword::OpTf
+                | Keyword::OpTr
+                | Keyword::OpTs
+                | Keyword::OpTd
+                | Keyword::OpTD
+                | Keyword::OpTm
+                | Keyword::OpTStar
+                | Keyword::OpTj
+                | Keyword::OpTJ
+                | Keyword::OpApostrophe
+                | Keyword::OpQuote
+                | Keyword::Opd0
+                | Keyword::Opd1
+                | Keyword::OpBI
+                | Keyword::OpID
+                | Keyword::OpEI
+                | Keyword::OpMP
+                | Keyword::OpDP
+                | Keyword::OpBMC
+                | Keyword::OpBDC
+                | Keyword::OpEMC
+                | Keyword::OpBX
+                | Keyword::OpEX
+                | Keyword::OpDo
+        ) || matches!(self, Keyword::Other(op) if is_content_stream_operator_str(op))
+    }
 }
 
 pub struct Lexer<'a> {
@@ -84,8 +334,8 @@ impl Lexer<'_> {
                 b'+' | b'-' | b'.' | b'0'..=b'9' => return Some(self.read_number(byte)),
                 _ => {
                     if is_regular(byte) {
-                        let word = self.read_word(byte);
-                        return Some(self.word_to_token(word));
+                        let (start, end) = self.read_word_bounds();
+                        return Some(self.word_to_token(&self.input[start..end]));
                     }
                 }
             }
@@ -179,7 +429,7 @@ impl Lexer<'_> {
             };
             seen += 1;
             if let Token::Keyword(op) = tok {
-                return is_content_stream_operator(op.as_str());
+                return op.is_content_stream_operator();
             }
         }
         false
@@ -301,57 +551,58 @@ impl Lexer<'_> {
     }
 
     fn read_name(&mut self) -> String {
-        let mut out = Vec::new();
+        let start = self.pos;
         while self.pos < self.input.len() {
             let byte = self.input[self.pos];
             if is_delim(byte) || is_whitespace(byte) {
                 break;
             }
-            out.push(byte);
             self.pos += 1;
         }
-        String::from_utf8(out).unwrap_or_default()
+        std::str::from_utf8(&self.input[start..self.pos])
+            .unwrap_or_default()
+            .to_string()
     }
 
     fn read_number(&mut self, first: u8) -> Token {
-        let mut out = Vec::new();
-        out.push(first);
+        let start = self.pos.saturating_sub(1);
+        let mut has_dot = first == b'.';
         while self.pos < self.input.len() {
             let byte = self.input[self.pos];
             if is_delim(byte) || is_whitespace(byte) {
                 break;
             }
-            out.push(byte);
+            if byte == b'.' {
+                has_dot = true;
+            }
             self.pos += 1;
         }
-        let s = String::from_utf8(out).unwrap_or_default();
-        if s.contains('.') {
-            Token::Real(s.parse().unwrap_or(0.0))
+        let s = std::str::from_utf8(&self.input[start..self.pos]).unwrap_or_default();
+        if has_dot {
+            Token::Real(s.parse::<f64>().unwrap_or(0.0))
         } else {
-            Token::Integer(s.parse().unwrap_or(0))
+            Token::Integer(s.parse::<i64>().unwrap_or(0))
         }
     }
 
-    fn read_word(&mut self, first: u8) -> String {
-        let mut out = Vec::new();
-        out.push(first);
+    fn read_word_bounds(&mut self) -> (usize, usize) {
+        let start = self.pos.saturating_sub(1);
         while self.pos < self.input.len() {
             let byte = self.input[self.pos];
             if is_delim(byte) || is_whitespace(byte) {
                 break;
             }
-            out.push(byte);
             self.pos += 1;
         }
-        String::from_utf8(out).unwrap_or_default()
+        (start, self.pos)
     }
 
-    fn word_to_token(&self, word: String) -> Token {
-        match word.as_str() {
-            "true" => Token::Boolean(true),
-            "false" => Token::Boolean(false),
-            "null" => Token::Null,
-            _ => Token::Keyword(word),
+    fn word_to_token(&self, word: &[u8]) -> Token {
+        match word {
+            b"true" => Token::Boolean(true),
+            b"false" => Token::Boolean(false),
+            b"null" => Token::Null,
+            _ => Token::Keyword(keyword_from_bytes(word)),
         }
     }
 }
@@ -375,7 +626,92 @@ fn is_regular(byte: u8) -> bool {
     !(is_delim(byte) || is_whitespace(byte))
 }
 
-fn is_content_stream_operator(op: &str) -> bool {
+fn keyword_from_bytes(word: &[u8]) -> Keyword {
+    match word {
+        b"obj" => Keyword::Obj,
+        b"endobj" => Keyword::EndObj,
+        b"stream" => Keyword::Stream,
+        b"endstream" => Keyword::EndStream,
+        b"trailer" => Keyword::Trailer,
+        b"R" => Keyword::Ref,
+        b"q" => Keyword::Opq,
+        b"Q" => Keyword::OpQ,
+        b"cm" => Keyword::OpCm,
+        b"w" => Keyword::OpW,
+        b"J" => Keyword::OpJ,
+        b"j" => Keyword::Opj,
+        b"M" => Keyword::OpM,
+        b"d" => Keyword::Opd,
+        b"ri" => Keyword::Opri,
+        b"i" => Keyword::Opi,
+        b"gs" => Keyword::Opgs,
+        b"m" => Keyword::Opm,
+        b"l" => Keyword::Opl,
+        b"c" => Keyword::Opc,
+        b"v" => Keyword::Opv,
+        b"y" => Keyword::Opy,
+        b"h" => Keyword::Oph,
+        b"re" => Keyword::Opre,
+        b"S" => Keyword::OpS,
+        b"s" => Keyword::Ops,
+        b"f" => Keyword::Opf,
+        b"F" => Keyword::OpF,
+        b"f*" => Keyword::OpfStar,
+        b"B" => Keyword::OpB,
+        b"B*" => Keyword::OpBStar,
+        b"b" => Keyword::Opb,
+        b"b*" => Keyword::OpbStar,
+        b"n" => Keyword::Opn,
+        b"W" => Keyword::OpWClip,
+        b"W*" => Keyword::OpWClipStar,
+        b"CS" => Keyword::OpCS,
+        b"cs" => Keyword::Opcs,
+        b"SC" => Keyword::OpSC,
+        b"SCN" => Keyword::OpSCN,
+        b"sc" => Keyword::Opsc,
+        b"scn" => Keyword::Opscn,
+        b"G" => Keyword::OpG,
+        b"g" => Keyword::Opg,
+        b"RG" => Keyword::OpRG,
+        b"rg" => Keyword::Oprg,
+        b"K" => Keyword::OpK,
+        b"k" => Keyword::Opk,
+        b"sh" => Keyword::Opsh,
+        b"BT" => Keyword::OpBT,
+        b"ET" => Keyword::OpET,
+        b"Tc" => Keyword::OpTc,
+        b"Tw" => Keyword::OpTw,
+        b"Tz" => Keyword::OpTz,
+        b"TL" => Keyword::OpTL,
+        b"Tf" => Keyword::OpTf,
+        b"Tr" => Keyword::OpTr,
+        b"Ts" => Keyword::OpTs,
+        b"Td" => Keyword::OpTd,
+        b"TD" => Keyword::OpTD,
+        b"Tm" => Keyword::OpTm,
+        b"T*" => Keyword::OpTStar,
+        b"Tj" => Keyword::OpTj,
+        b"TJ" => Keyword::OpTJ,
+        b"'" => Keyword::OpApostrophe,
+        b"\"" => Keyword::OpQuote,
+        b"d0" => Keyword::Opd0,
+        b"d1" => Keyword::Opd1,
+        b"BI" => Keyword::OpBI,
+        b"ID" => Keyword::OpID,
+        b"EI" => Keyword::OpEI,
+        b"MP" => Keyword::OpMP,
+        b"DP" => Keyword::OpDP,
+        b"BMC" => Keyword::OpBMC,
+        b"BDC" => Keyword::OpBDC,
+        b"EMC" => Keyword::OpEMC,
+        b"BX" => Keyword::OpBX,
+        b"EX" => Keyword::OpEX,
+        b"Do" => Keyword::OpDo,
+        _ => Keyword::Other(std::str::from_utf8(word).unwrap_or_default().to_string()),
+    }
+}
+
+fn is_content_stream_operator_str(op: &str) -> bool {
     matches!(
         op,
         "q" | "Q"
@@ -522,7 +858,7 @@ mod tests {
         let stream = lexer.consume_stream_until_endstream();
         assert_eq!(stream, b"abc".to_vec());
         assert_eq!(lexer.position(), 10);
-        assert_eq!(lexer.next(), Some(Token::Keyword("endstream".to_string())));
+        assert_eq!(lexer.next(), Some(Token::Keyword(Keyword::EndStream)));
     }
 
     #[test]
@@ -534,7 +870,7 @@ mod tests {
         let stream = lexer.consume_stream_until_endstream();
         assert_eq!(stream, b"xyz".to_vec());
         assert_eq!(lexer.position(), 11);
-        assert_eq!(lexer.next(), Some(Token::Keyword("endstream".to_string())));
+        assert_eq!(lexer.next(), Some(Token::Keyword(Keyword::EndStream)));
     }
 
     #[test]
@@ -567,7 +903,7 @@ mod tests {
 
         lexer.skip_inline_image_data();
         assert_eq!(lexer.position(), 6);
-        assert_eq!(lexer.next(), Some(Token::Keyword("Q".to_string())));
+        assert_eq!(lexer.next(), Some(Token::Keyword(Keyword::OpQ)));
     }
 
     #[test]
@@ -578,6 +914,32 @@ mod tests {
         lexer.set_position(2);
 
         lexer.skip_inline_image_data();
-        assert_eq!(lexer.next(), Some(Token::Keyword("Q".to_string())));
+        assert_eq!(lexer.next(), Some(Token::Keyword(Keyword::OpQ)));
+    }
+
+    #[test]
+    fn tokenizer_maps_common_words_to_keyword_enum() {
+        let input = b"obj endobj stream endstream trailer R Tf TJ";
+        let mut lexer = Lexer::new(input);
+        assert_eq!(lexer.next(), Some(Token::Keyword(Keyword::Obj)));
+        assert_eq!(lexer.next(), Some(Token::Keyword(Keyword::EndObj)));
+        assert_eq!(lexer.next(), Some(Token::Keyword(Keyword::Stream)));
+        assert_eq!(lexer.next(), Some(Token::Keyword(Keyword::EndStream)));
+        assert_eq!(lexer.next(), Some(Token::Keyword(Keyword::Trailer)));
+        assert_eq!(lexer.next(), Some(Token::Keyword(Keyword::Ref)));
+        assert_eq!(lexer.next(), Some(Token::Keyword(Keyword::OpTf)));
+        assert_eq!(lexer.next(), Some(Token::Keyword(Keyword::OpTJ)));
+        assert_eq!(lexer.next(), None);
+    }
+
+    #[test]
+    fn tokenizer_keeps_unknown_words_as_keyword_other() {
+        let input = b"CustomOperator";
+        let mut lexer = Lexer::new(input);
+        assert_eq!(
+            lexer.next(),
+            Some(Token::Keyword(Keyword::Other("CustomOperator".to_string())))
+        );
+        assert_eq!(lexer.next(), None);
     }
 }

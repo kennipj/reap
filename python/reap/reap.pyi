@@ -86,6 +86,7 @@ class TextBlockIndex:
         data: str | bytes | bytearray | memoryview | PathLike[str],
         include_chars: bool = False,
         password: str | bytes | bytearray | memoryview | None = None,
+        concurrency: Literal["on", "off", "auto"] = "on",
     ) -> None: ...
     @classmethod
     def from_path(
@@ -93,9 +94,11 @@ class TextBlockIndex:
         path: str | PathLike[str],
         include_chars: bool = False,
         password: str | bytes | bytearray | memoryview | None = None,
+        concurrency: Literal["on", "off", "auto"] = "on",
     ) -> TextBlockIndex: ...
     def search(self, rect: Rectangle, overlap: float) -> list[TextBlock]: ...
     def search_regex(self, pattern: str) -> list[TextBlock]: ...
+    def has_regex(self, pattern: str) -> bool: ...
     def scoped(
         self,
         rect: Rectangle,

@@ -4,13 +4,13 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyList, PyModule, PyType};
+use pyo3::types::{PyAny, PyBytes, PyList, PyModule, PyType};
 
 use crate::parser::{ParseError, Parser};
 use crate::rtree::{RegexSearchError, ScopedMergeRules, TextBlockIndex as RsTextBlockIndex};
 use crate::text::{
-    CharBBox, ExpandDirection, ExpandError, Rectangle as RsRectangle, extract_char_bboxes,
-    extract_text_blocks,
+    CharBBox, ExpandDirection, ExpandError, ExtractParallelMode, Rectangle as RsRectangle,
+    extract_char_bboxes_with_parallel_mode, extract_text_blocks_with_parallel_mode,
 };
 use crate::tokenizer::Lexer;
 
@@ -284,20 +284,35 @@ struct TextBlockIndex {
 #[pymethods]
 impl TextBlockIndex {
     #[new]
-    #[pyo3(signature = (obj, include_chars=false, password=None))]
+    #[pyo3(signature = (obj, include_chars=false, password=None, concurrency="on"))]
     fn new(
         py: Python<'_>,
         obj: &Bound<'_, PyAny>,
         include_chars: bool,
         password: Option<&Bound<'_, PyAny>>,
+        concurrency: &str,
     ) -> PyResult<Self> {
         let password = extract_password_bytes(password)?;
-        if let Ok(bytes) = obj.extract::<Vec<u8>>() {
-            return Self::from_lexer(
+        let parallel_mode = map_concurrency_to_parallel_mode(concurrency)?;
+        if let Ok(py_bytes) = obj.cast::<PyBytes>() {
+            return Self::from_bytes(
                 py,
-                Lexer::from_bytes(bytes),
+                py_bytes.as_bytes(),
                 include_chars,
                 password.as_deref(),
+                parallel_mode,
+            );
+        }
+        if let Ok(bytes) = obj.extract::<&[u8]>() {
+            return Self::from_bytes(py, bytes, include_chars, password.as_deref(), parallel_mode);
+        }
+        if let Ok(bytes) = obj.extract::<Vec<u8>>() {
+            return Self::from_bytes(
+                py,
+                &bytes,
+                include_chars,
+                password.as_deref(),
+                parallel_mode,
             );
         }
 
@@ -318,23 +333,25 @@ impl TextBlockIndex {
         let lexer = Lexer::from_file(&path).map_err(|e| {
             pyo3::exceptions::PyIOError::new_err(format!("failed to read {}: {}", path, e))
         })?;
-        Self::from_lexer(py, lexer, include_chars, password.as_deref())
+        Self::from_lexer(py, lexer, include_chars, password.as_deref(), parallel_mode)
     }
 
     #[classmethod]
-    #[pyo3(signature = (path, include_chars=false, password=None))]
+    #[pyo3(signature = (path, include_chars=false, password=None, concurrency="on"))]
     fn from_path(
         _cls: &Bound<'_, PyType>,
         py: Python<'_>,
         path: &str,
         include_chars: bool,
         password: Option<&Bound<'_, PyAny>>,
+        concurrency: &str,
     ) -> PyResult<Self> {
         let password = extract_password_bytes(password)?;
+        let parallel_mode = map_concurrency_to_parallel_mode(concurrency)?;
         let lexer = Lexer::from_file(path).map_err(|e| {
             pyo3::exceptions::PyIOError::new_err(format!("failed to read {}: {}", path, e))
         })?;
-        Self::from_lexer(py, lexer, include_chars, password.as_deref())
+        Self::from_lexer(py, lexer, include_chars, password.as_deref(), parallel_mode)
     }
 
     fn search(&self, py: Python<'_>, rect: &Rectangle, overlap: f64) -> PyResult<Py<PyAny>> {
@@ -412,6 +429,15 @@ impl TextBlockIndex {
             .borrow_mut()
             .insert(pattern.to_string(), py_matches);
         Ok(out.into_any().unbind())
+    }
+
+    fn has_regex(&self, pattern: &str) -> PyResult<bool> {
+        let mut inner = self.inner.borrow_mut();
+        inner.search_regex_exists(pattern).map_err(|err| match err {
+            RegexSearchError::InvalidPattern(e) => {
+                pyo3::exceptions::PyValueError::new_err(format!("invalid regex pattern: {}", e))
+            }
+        })
     }
 
     #[pyo3(signature = (
@@ -512,21 +538,53 @@ impl TextBlockIndex {
 }
 
 impl TextBlockIndex {
+    fn from_bytes(
+        _py: Python<'_>,
+        bytes: &[u8],
+        include_chars: bool,
+        password: Option<&[u8]>,
+        parallel_mode: ExtractParallelMode,
+    ) -> PyResult<Self> {
+        let doc = Parser::new(Lexer::new(bytes))
+            .parse_with_password(password)
+            .map_err(parse_error_to_py)?;
+        let chars = if include_chars {
+            Some(extract_char_bboxes_with_parallel_mode(
+                &doc,
+                Some(parallel_mode),
+            ))
+        } else {
+            None
+        };
+        let blocks = extract_text_blocks_with_parallel_mode(&doc, Some(parallel_mode));
+        let py_blocks = (0..blocks.len()).map(|_| None).collect();
+        Ok(Self {
+            inner: RefCell::new(RsTextBlockIndex::new(blocks)),
+            chars,
+            py_blocks: RefCell::new(py_blocks),
+            regex_py_cache: RefCell::new(HashMap::new()),
+        })
+    }
+
     fn from_lexer(
         _py: Python<'_>,
         lexer: Lexer,
         include_chars: bool,
         password: Option<&[u8]>,
+        parallel_mode: ExtractParallelMode,
     ) -> PyResult<Self> {
         let doc = Parser::new(lexer)
             .parse_with_password(password)
             .map_err(parse_error_to_py)?;
         let chars = if include_chars {
-            Some(extract_char_bboxes(&doc))
+            Some(extract_char_bboxes_with_parallel_mode(
+                &doc,
+                Some(parallel_mode),
+            ))
         } else {
             None
         };
-        let blocks = extract_text_blocks(&doc);
+        let blocks = extract_text_blocks_with_parallel_mode(&doc, Some(parallel_mode));
         let py_blocks = (0..blocks.len()).map(|_| None).collect();
         Ok(Self {
             inner: RefCell::new(RsTextBlockIndex::new(blocks)),
@@ -565,6 +623,17 @@ impl TextBlockIndex {
             return Ok(Some(py_block));
         }
         Ok(slot.as_ref().map(|block| block.clone_ref(py)))
+    }
+}
+
+fn map_concurrency_to_parallel_mode(concurrency: &str) -> PyResult<ExtractParallelMode> {
+    match concurrency.trim().to_ascii_lowercase().as_str() {
+        "on" => Ok(ExtractParallelMode::On),
+        "off" => Ok(ExtractParallelMode::Off),
+        "auto" => Ok(ExtractParallelMode::Auto),
+        _ => Err(pyo3::exceptions::PyValueError::new_err(
+            "concurrency must be one of: 'on', 'off', 'auto'",
+        )),
     }
 }
 
