@@ -394,6 +394,7 @@ struct RegexSearchIndex {
 }
 
 const REGEX_LINE_VERTICAL_OVERLAP_THRESHOLD: f64 = 0.8;
+const REGEX_LINE_HEIGHT_RATIO_LIMIT: f64 = 1.5;
 
 impl TextBlockIndex {
     pub fn new(blocks: Vec<TextBlock>) -> Self {
@@ -1136,6 +1137,12 @@ fn cluster_block_indices_into_lines(
             .filter(|idx| active_local[*idx])
             .collect();
 
+        let seed_height = rect_height(local_rects[seed_local]);
+        selected_local.retain(|&candidate_local| {
+            let candidate_height = rect_height(local_rects[candidate_local]);
+            seed_height <= (candidate_height * REGEX_LINE_HEIGHT_RATIO_LIMIT)
+        });
+
         if selected_local.is_empty() {
             selected_local.push(seed_local);
         }
@@ -1175,6 +1182,10 @@ fn cluster_block_indices_into_lines(
 
 fn normalized_vertical_span(rect: Rectangle) -> (f64, f64) {
     (rect.top.min(rect.bottom), rect.top.max(rect.bottom))
+}
+
+fn rect_height(rect: RectF) -> f64 {
+    (rect.max_y - rect.min_y).abs()
 }
 
 fn build_page_body(blocks: &[TextBlock], lines: &[Vec<usize>]) -> (String, Vec<WordSpan>) {

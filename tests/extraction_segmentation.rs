@@ -839,6 +839,150 @@ fn search_regex_line_builder_uses_directional_rtree_overlap() {
 }
 
 #[test]
+fn search_regex_line_builder_height_guard_separates_tall_and_normal_blocks() {
+    let blocks = vec![
+        TextBlock {
+            page_index: 0,
+            text: "BIG".to_string(),
+            bbox: Rectangle {
+                top: 10.0,
+                left: 10.0,
+                bottom: 30.0,
+                right: 24.0,
+            },
+        },
+        TextBlock {
+            page_index: 0,
+            text: "Alpha".to_string(),
+            bbox: Rectangle {
+                top: 10.5,
+                left: 72.0,
+                bottom: 17.0,
+                right: 88.0,
+            },
+        },
+        TextBlock {
+            page_index: 0,
+            text: "Delta".to_string(),
+            bbox: Rectangle {
+                top: 19.5,
+                left: 72.0,
+                bottom: 26.5,
+                right: 102.0,
+            },
+        },
+        TextBlock {
+            page_index: 0,
+            text: "Beta".to_string(),
+            bbox: Rectangle {
+                top: 10.5,
+                left: 90.0,
+                bottom: 17.0,
+                right: 100.0,
+            },
+        },
+        TextBlock {
+            page_index: 0,
+            text: "Gamma".to_string(),
+            bbox: Rectangle {
+                top: 10.5,
+                left: 102.0,
+                bottom: 17.0,
+                right: 112.0,
+            },
+        },
+        TextBlock {
+            page_index: 0,
+            text: "2028".to_string(),
+            bbox: Rectangle {
+                top: 10.5,
+                left: 30.0,
+                bottom: 30.5,
+                right: 48.0,
+            },
+        },
+    ];
+    let index = TextBlockIndex::new(blocks);
+    let full_text = index.text();
+    let lines: Vec<&str> = full_text.lines().collect();
+    assert_eq!(lines, vec!["BIG 2028", "Alpha Beta Gamma", "Delta"]);
+}
+
+#[test]
+fn search_regex_line_builder_height_guard_preserves_regex_across_newlines() {
+    let blocks = vec![
+        TextBlock {
+            page_index: 0,
+            text: "BIG".to_string(),
+            bbox: Rectangle {
+                top: 10.0,
+                left: 10.0,
+                bottom: 30.0,
+                right: 24.0,
+            },
+        },
+        TextBlock {
+            page_index: 0,
+            text: "Alpha".to_string(),
+            bbox: Rectangle {
+                top: 10.5,
+                left: 72.0,
+                bottom: 17.0,
+                right: 88.0,
+            },
+        },
+        TextBlock {
+            page_index: 0,
+            text: "Delta".to_string(),
+            bbox: Rectangle {
+                top: 19.5,
+                left: 72.0,
+                bottom: 26.5,
+                right: 102.0,
+            },
+        },
+        TextBlock {
+            page_index: 0,
+            text: "Beta".to_string(),
+            bbox: Rectangle {
+                top: 10.5,
+                left: 90.0,
+                bottom: 17.0,
+                right: 100.0,
+            },
+        },
+        TextBlock {
+            page_index: 0,
+            text: "Gamma".to_string(),
+            bbox: Rectangle {
+                top: 10.5,
+                left: 102.0,
+                bottom: 17.0,
+                right: 112.0,
+            },
+        },
+        TextBlock {
+            page_index: 0,
+            text: "2028".to_string(),
+            bbox: Rectangle {
+                top: 10.5,
+                left: 30.0,
+                bottom: 30.5,
+                right: 48.0,
+            },
+        },
+    ];
+    let mut index = TextBlockIndex::new(blocks);
+    let hits = index
+        .search_regex(r"BIG\s+2028\s+Alpha\s+Beta\s+Gamma\s+Delta")
+        .expect("regex should compile");
+    assert!(
+        !hits.is_empty(),
+        "expected regex to match across lines separated by newline whitespace"
+    );
+}
+
+#[test]
 fn search_regex_line_builder_consumes_all_blocks_once() {
     let blocks = vec![
         TextBlock {
