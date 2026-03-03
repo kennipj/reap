@@ -586,6 +586,8 @@ const TYPE3_FALLBACK_TEXT_HEIGHT: f64 = 1.0;
 const TYPE3_UNITS_EPSILON: f64 = 1e-9;
 const MAX_TRACKED_PAINTED_FILLS: usize = 4096;
 const MIN_TEXT_BACKGROUND_CONTRAST_RATIO: f64 = 1.05;
+const MIN_CLIPPED_GLYPH_VISIBLE_FRACTION: f64 = 0.25;
+const GLYPH_AREA_EPSILON: f64 = 1e-9;
 
 #[derive(Debug, Clone)]
 struct TextState {
@@ -1804,6 +1806,25 @@ fn text_is_visible_at_bbox(
     true
 }
 
+fn clipped_glyph_visibility_fraction_is_sufficient(
+    raw_bbox: Rect,
+    visible_bbox: Rect,
+    has_clip: bool,
+    allow_invisible_tagged_text: bool,
+) -> bool {
+    if !has_clip || allow_invisible_tagged_text {
+        return true;
+    }
+    let raw_area = ((raw_bbox.max_x - raw_bbox.min_x).max(0.0))
+        * ((raw_bbox.max_y - raw_bbox.min_y).max(0.0));
+    if raw_area <= GLYPH_AREA_EPSILON {
+        return true;
+    }
+    let visible_area = ((visible_bbox.max_x - visible_bbox.min_x).max(0.0))
+        * ((visible_bbox.max_y - visible_bbox.min_y).max(0.0));
+    (visible_area / raw_area) >= MIN_CLIPPED_GLYPH_VISIBLE_FRACTION
+}
+
 fn text_advance_distance(text_state: &TextState, glyph_w: f64, apply_word_spacing: bool) -> f64 {
     let mut advance = glyph_w * text_state.font_size;
     if apply_word_spacing {
@@ -1957,8 +1978,24 @@ fn show_text_impl<C, F>(
             } else {
                 bbox
             };
-            if !needs_visibility_check
-                || text_is_visible_at_bbox(text_state, visible_bbox, painted_fills)
+            let clip_fraction_ok = if clip.is_some()
+                && !allow_invisible_tagged_text
+                && (visible_bbox.min_x > bbox.min_x
+                    || visible_bbox.min_y > bbox.min_y
+                    || visible_bbox.max_x < bbox.max_x
+                    || visible_bbox.max_y < bbox.max_y)
+            {
+                clipped_glyph_visibility_fraction_is_sufficient(
+                    bbox,
+                    visible_bbox,
+                    true,
+                    allow_invisible_tagged_text,
+                )
+            } else {
+                true
+            };
+            if clip_fraction_ok && (!needs_visibility_check
+                || text_is_visible_at_bbox(text_state, visible_bbox, painted_fills))
             {
                 push(
                     CharBBox {
@@ -2015,8 +2052,24 @@ fn show_text_impl<C, F>(
             } else {
                 raw_segment_bbox
             };
-            if !needs_visibility_check
-                || text_is_visible_at_bbox(text_state, visible_segment_bbox, painted_fills)
+            let clip_fraction_ok = if clip.is_some()
+                && !allow_invisible_tagged_text
+                && (visible_segment_bbox.min_x > raw_segment_bbox.min_x
+                    || visible_segment_bbox.min_y > raw_segment_bbox.min_y
+                    || visible_segment_bbox.max_x < raw_segment_bbox.max_x
+                    || visible_segment_bbox.max_y < raw_segment_bbox.max_y)
+            {
+                clipped_glyph_visibility_fraction_is_sufficient(
+                    raw_segment_bbox,
+                    visible_segment_bbox,
+                    true,
+                    allow_invisible_tagged_text,
+                )
+            } else {
+                true
+            };
+            if clip_fraction_ok && (!needs_visibility_check
+                || text_is_visible_at_bbox(text_state, visible_segment_bbox, painted_fills))
             {
                 push(
                     CharBBox {
@@ -4806,6 +4859,33 @@ mod tests {
             bg_luminance: None,
         }];
         assert!(text_is_visible_at_bbox(&text_state, bbox, &fills));
+    }
+
+    #[test]
+    fn clipped_glyph_fraction_filter_rejects_tiny_visible_sliver() {
+        let raw = make_rect(0.0, 0.0, 10.0, 10.0);
+        let visible = make_rect(0.0, 0.0, 10.0, 2.4);
+        assert!(!clipped_glyph_visibility_fraction_is_sufficient(
+            raw, visible, true, false
+        ));
+    }
+
+    #[test]
+    fn clipped_glyph_fraction_filter_keeps_visible_quarter_or_more() {
+        let raw = make_rect(0.0, 0.0, 10.0, 10.0);
+        let visible = make_rect(0.0, 0.0, 10.0, 2.5);
+        assert!(clipped_glyph_visibility_fraction_is_sufficient(
+            raw, visible, true, false
+        ));
+    }
+
+    #[test]
+    fn clipped_glyph_fraction_filter_is_bypassed_for_tagged_invisible_text() {
+        let raw = make_rect(0.0, 0.0, 10.0, 10.0);
+        let visible = make_rect(0.0, 0.0, 10.0, 1.0);
+        assert!(clipped_glyph_visibility_fraction_is_sufficient(
+            raw, visible, true, true
+        ));
     }
 
     #[test]

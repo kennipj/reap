@@ -286,6 +286,54 @@ fn white_deduction_codes_are_hidden_but_labels_remain_visible() {
 }
 
 #[test]
+fn clipped_overlap_sliver_text_is_excluded_while_visible_labels_remain() {
+    let fixture = edge_pdf("edge_clipped_overlap_invisible_text.pdf");
+    let bytes = fs::read(&fixture).expect("failed to read clipped overlap fixture");
+    assert!(
+        bytes.windows(b"re W n".len()).any(|w| w == b"re W n"),
+        "expected clipping marker in fixture bytes"
+    );
+
+    let doc = load_doc(&fixture);
+    let blocks = extract_text_blocks(&doc);
+
+    for visible in ["ALPHA", "CORE", "BETA", "VISION"] {
+        assert!(
+            blocks
+                .iter()
+                .any(|b| b.page_index == 0 && b.text == visible),
+            "expected visible token to remain: {}",
+            visible
+        );
+    }
+
+    assert!(
+        blocks.iter().any(|b| {
+            b.page_index == 0 && b.text == "COVER" && (b.bbox.bottom - b.bbox.top) >= 5.0
+        }),
+        "expected at least one normal-height COVER token to remain visible"
+    );
+
+    for hidden in ["GHOST", "NOTE", "SHADOW"] {
+        assert!(
+            !blocks.iter().any(|b| b.page_index == 0 && b.text == hidden),
+            "expected clipped sliver token to be excluded: {}",
+            hidden
+        );
+    }
+
+    assert!(
+        !blocks.iter().any(|b| {
+            b.page_index == 0
+                && b.text == "COVER"
+                && b.bbox.left < 70.0
+                && (b.bbox.bottom - b.bbox.top) < 2.0
+        }),
+        "expected no tiny-height overlapping COVER sliver in the left overlap region"
+    );
+}
+
+#[test]
 fn separation_colorspace_text_remains_visible() {
     let fixture = edge_pdf("edge_separation_type0_corrupt_xref.pdf");
     let bytes = fs::read(&fixture).expect("failed to read separation fixture");
