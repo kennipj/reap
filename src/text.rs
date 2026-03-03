@@ -753,6 +753,7 @@ fn extract_char_bboxes_raw_from_pages(doc: &PdfDoc, pages: &[Object]) -> Vec<Cha
     let mut out = Vec::new();
     let mut font_map_cache: FontMapCache = HashMap::new();
     for (page_index, page) in pages.iter().enumerate() {
+        let page_clip = page_clip_rect(doc, page);
         let (resources, contents) = page_resources_and_contents(doc, page);
         let content_bytes = decode_contents(doc, &contents);
         let ctm = Matrix::identity();
@@ -764,6 +765,7 @@ fn extract_char_bboxes_raw_from_pages(doc: &PdfDoc, pages: &[Object]) -> Vec<Cha
             &content_bytes,
             ctm,
             text_state,
+            page_clip,
             &mut font_map_cache,
             &mut out,
         );
@@ -776,6 +778,7 @@ fn extract_char_bboxes_raw_from_pages(doc: &PdfDoc, pages: &[Object]) -> Vec<Cha
                 &bytes,
                 ann_matrix,
                 text_state,
+                page_clip,
                 &mut font_map_cache,
                 &mut out,
             );
@@ -947,6 +950,7 @@ fn extract_text_blocks_raw(doc: &PdfDoc, pages: &[Object]) -> Vec<TextBlock> {
     let mut blocks = BlockAccumulator::default();
     let mut font_map_cache: FontMapCache = HashMap::new();
     for (page_index, page) in pages.iter().enumerate() {
+        let page_clip = page_clip_rect(doc, page);
         let (resources, contents) = page_resources_and_contents(doc, page);
         let content_bytes = decode_contents(doc, &contents);
         let ctm = Matrix::identity();
@@ -958,6 +962,7 @@ fn extract_text_blocks_raw(doc: &PdfDoc, pages: &[Object]) -> Vec<TextBlock> {
             &content_bytes,
             ctm,
             text_state,
+            page_clip,
             &mut font_map_cache,
             &mut blocks,
         );
@@ -970,6 +975,7 @@ fn extract_text_blocks_raw(doc: &PdfDoc, pages: &[Object]) -> Vec<TextBlock> {
                 &bytes,
                 ann_matrix,
                 text_state,
+                page_clip,
                 &mut font_map_cache,
                 &mut blocks,
             );
@@ -1001,6 +1007,7 @@ fn extract_char_bboxes_with_style_raw_from_pages(
     let mut out = Vec::new();
     let mut font_map_cache: FontMapCache = HashMap::new();
     for (page_index, page) in pages.iter().enumerate() {
+        let page_clip = page_clip_rect(doc, page);
         let (resources, contents) = page_resources_and_contents(doc, page);
         let content_bytes = decode_contents(doc, &contents);
         let ctm = Matrix::identity();
@@ -1012,6 +1019,7 @@ fn extract_char_bboxes_with_style_raw_from_pages(
             &content_bytes,
             ctm,
             text_state,
+            page_clip,
             &mut font_map_cache,
             &mut out,
         );
@@ -1024,6 +1032,7 @@ fn extract_char_bboxes_with_style_raw_from_pages(
                 &bytes,
                 ann_matrix,
                 text_state,
+                page_clip,
                 &mut font_map_cache,
                 &mut out,
             );
@@ -1039,6 +1048,7 @@ fn process_content(
     content_bytes: &[u8],
     ctm: Matrix,
     text_state: TextState,
+    initial_clip: Option<Rect>,
     font_map_cache: &mut FontMapCache,
     out: &mut Vec<CharBBox>,
 ) {
@@ -1050,6 +1060,7 @@ fn process_content(
         content_bytes,
         ctm,
         text_state,
+        initial_clip,
         &mut painted_fills,
         font_map_cache,
         out,
@@ -1064,6 +1075,7 @@ fn process_content_with_style(
     content_bytes: &[u8],
     ctm: Matrix,
     text_state: TextState,
+    initial_clip: Option<Rect>,
     font_map_cache: &mut FontMapCache,
     out: &mut Vec<(CharBBox, TextStyle)>,
 ) {
@@ -1075,6 +1087,7 @@ fn process_content_with_style(
         content_bytes,
         ctm,
         text_state,
+        initial_clip,
         &mut painted_fills,
         font_map_cache,
         out,
@@ -1089,6 +1102,7 @@ fn process_content_with_blocks(
     content_bytes: &[u8],
     ctm: Matrix,
     text_state: TextState,
+    initial_clip: Option<Rect>,
     font_map_cache: &mut FontMapCache,
     out: &mut BlockAccumulator,
 ) {
@@ -1100,6 +1114,7 @@ fn process_content_with_blocks(
         content_bytes,
         ctm,
         text_state,
+        initial_clip,
         &mut painted_fills,
         font_map_cache,
         out,
@@ -1114,6 +1129,7 @@ fn process_content_impl<C, F>(
     content_bytes: &[u8],
     mut ctm: Matrix,
     text_state: TextState,
+    initial_clip: Option<Rect>,
     painted_fills: &mut Vec<PaintedFill>,
     font_map_cache: &mut FontMapCache,
     out: &mut C,
@@ -1135,7 +1151,7 @@ fn process_content_impl<C, F>(
     let mut ctm_stack: Vec<Matrix> = Vec::new();
     let mut state_stack: Vec<TextState> = Vec::new();
     let mut clip_stack: Vec<Option<Rect>> = Vec::new();
-    let mut current_clip: Option<Rect> = None;
+    let mut current_clip: Option<Rect> = initial_clip;
     let mut path_points: Vec<(f64, f64)> = Vec::new();
     let mut path_bbox: Option<Rect> = None;
     let mut marked_content_stack: Vec<MarkedContentScope> = Vec::new();
@@ -1332,6 +1348,7 @@ fn process_content_impl<C, F>(
                                             &form_bytes,
                                             ctm.multiply(form_matrix),
                                             text_state.clone(),
+                                            current_clip,
                                             painted_fills,
                                             font_map_cache,
                                             out,
@@ -1931,22 +1948,27 @@ fn show_text_impl<C, F>(
             };
             let total_advance = text_advance_distance(text_state, glyph_w, ch == ' ');
 
-            if let Some(c) = clip {
+            let visible_bbox = if let Some(c) = clip {
                 if !c.intersects(&bbox) {
                     advance_text_matrix_by(text_state, total_advance);
                     return;
                 }
-            }
-            if !needs_visibility_check || text_is_visible_at_bbox(text_state, bbox, painted_fills) {
+                bbox.intersect(c)
+            } else {
+                bbox
+            };
+            if !needs_visibility_check
+                || text_is_visible_at_bbox(text_state, visible_bbox, painted_fills)
+            {
                 push(
                     CharBBox {
                         page_index,
                         ch,
                         bbox: Rectangle {
-                            left: bbox.min_x,
-                            top: bbox.min_y,
-                            right: bbox.max_x,
-                            bottom: bbox.max_y,
+                            left: visible_bbox.min_x,
+                            top: visible_bbox.min_y,
+                            right: visible_bbox.max_x,
+                            bottom: visible_bbox.max_y,
                         },
                     },
                     out,
@@ -1975,7 +1997,7 @@ fn show_text_impl<C, F>(
         let per_char_advance = total_advance / char_count as f64;
         let mut segment_text_matrix = text_state.text_matrix;
         for ch in decoded_text.chars() {
-            let segment_bbox = glyph_rect_with_text_matrix(
+            let raw_segment_bbox = glyph_rect_with_text_matrix(
                 font,
                 segment_text_matrix,
                 ctm,
@@ -1984,18 +2006,27 @@ fn show_text_impl<C, F>(
                 rise,
                 per_char_glyph_w,
             );
+            let visible_segment_bbox = if let Some(c) = clip {
+                if !c.intersects(&raw_segment_bbox) {
+                    advance_matrix_by(&mut segment_text_matrix, per_char_advance);
+                    continue;
+                }
+                raw_segment_bbox.intersect(c)
+            } else {
+                raw_segment_bbox
+            };
             if !needs_visibility_check
-                || text_is_visible_at_bbox(text_state, segment_bbox, painted_fills)
+                || text_is_visible_at_bbox(text_state, visible_segment_bbox, painted_fills)
             {
                 push(
                     CharBBox {
                         page_index,
                         ch,
                         bbox: Rectangle {
-                            left: segment_bbox.min_x,
-                            top: segment_bbox.min_y,
-                            right: segment_bbox.max_x,
-                            bottom: segment_bbox.max_y,
+                            left: visible_segment_bbox.min_x,
+                            top: visible_segment_bbox.min_y,
+                            right: visible_segment_bbox.max_x,
+                            bottom: visible_segment_bbox.max_y,
                         },
                     },
                     out,
@@ -2108,10 +2139,32 @@ fn collect_pages(doc: &PdfDoc) -> Vec<Object> {
         let pages_ref = root.as_dict().and_then(|d| d.get("Pages"));
         if let Some(pages_root) = pages_ref {
             let resolved = doc.resolve(pages_root).clone();
-            walk_page_tree(doc, &resolved, None, None, None, &mut pages);
+            walk_page_tree(doc, &resolved, None, None, None, None, &mut pages);
         }
     }
     pages
+}
+
+fn effective_page_box_from_dict(
+    doc: &PdfDoc,
+    page_dict: &HashMap<String, Object>,
+) -> Option<(f64, f64, f64, f64)> {
+    page_dict
+        .get("CropBox")
+        .or_else(|| page_dict.get("MediaBox"))
+        .map(|v| doc.resolve(v))
+        .and_then(parse_rect)
+}
+
+fn page_clip_rect(doc: &PdfDoc, page: &Object) -> Option<Rect> {
+    let page_dict = page.as_dict()?;
+    let (x_min, y_min, x_max, y_max) = effective_page_box_from_dict(doc, page_dict)?;
+    Some(Rect {
+        min_x: x_min,
+        min_y: y_min,
+        max_x: x_max,
+        max_y: y_max,
+    })
 }
 
 fn page_layouts_for_pages(doc: &PdfDoc, pages: &[Object]) -> Vec<PageLayout> {
@@ -2119,12 +2172,10 @@ fn page_layouts_for_pages(doc: &PdfDoc, pages: &[Object]) -> Vec<PageLayout> {
     let mut y_offset = 0.0;
     for page in pages {
         let page_dict = page.as_dict();
-        let media_box = page_dict
-            .and_then(|d| d.get("MediaBox").or_else(|| d.get("CropBox")))
-            .map(|v| doc.resolve(v))
-            .and_then(parse_rect)
+        let page_box = page_dict
+            .and_then(|d| effective_page_box_from_dict(doc, d))
             .unwrap_or((0.0, 0.0, 0.0, 0.0));
-        let (x_min, y_min, x_max, y_max) = normalize_rect_tuple(media_box);
+        let (x_min, y_min, x_max, y_max) = normalize_rect_tuple(page_box);
         let width = (x_max - x_min).max(0.0);
         let height = (y_max - y_min).max(0.0);
         let rotation = normalized_page_rotation(
@@ -2155,10 +2206,16 @@ fn page_layouts_for_pages(doc: &PdfDoc, pages: &[Object]) -> Vec<PageLayout> {
 fn canonicalize_char_bboxes(chars: Vec<CharBBox>, layouts: &[PageLayout]) -> Vec<CharBBox> {
     chars
         .into_iter()
-        .map(|ch| CharBBox {
-            page_index: ch.page_index,
-            ch: ch.ch,
-            bbox: canonicalize_rect(ch.bbox, ch.page_index, layouts),
+        .filter_map(|ch| {
+            let bbox = canonicalize_rect(ch.bbox, ch.page_index, layouts);
+            if !is_valid_canonical_rect(&bbox) {
+                return None;
+            }
+            Some(CharBBox {
+                page_index: ch.page_index,
+                ch: ch.ch,
+                bbox,
+            })
         })
         .collect()
 }
@@ -2169,15 +2226,19 @@ fn canonicalize_char_bboxes_with_style(
 ) -> Vec<(CharBBox, TextStyle)> {
     chars
         .into_iter()
-        .map(|(ch, style)| {
-            (
+        .filter_map(|(ch, style)| {
+            let bbox = canonicalize_rect(ch.bbox, ch.page_index, layouts);
+            if !is_valid_canonical_rect(&bbox) {
+                return None;
+            }
+            Some((
                 CharBBox {
                     page_index: ch.page_index,
                     ch: ch.ch,
-                    bbox: canonicalize_rect(ch.bbox, ch.page_index, layouts),
+                    bbox,
                 },
                 style,
-            )
+            ))
         })
         .collect()
 }
@@ -2185,10 +2246,16 @@ fn canonicalize_char_bboxes_with_style(
 fn canonicalize_text_blocks(blocks: Vec<TextBlock>, layouts: &[PageLayout]) -> Vec<TextBlock> {
     blocks
         .into_iter()
-        .map(|block| TextBlock {
-            page_index: block.page_index,
-            text: block.text,
-            bbox: canonicalize_rect(block.bbox, block.page_index, layouts),
+        .filter_map(|block| {
+            let bbox = canonicalize_rect(block.bbox, block.page_index, layouts);
+            if !is_valid_canonical_rect(&bbox) {
+                return None;
+            }
+            Some(TextBlock {
+                page_index: block.page_index,
+                text: block.text,
+                bbox,
+            })
         })
         .collect()
 }
@@ -2290,11 +2357,16 @@ fn canonicalize_rect(rect: Rectangle, page_index: usize, layouts: &[PageLayout])
             (min_x.min(x), max_x.max(x), min_y.min(y), max_y.max(y))
         },
     );
+    let clamped_min_x = min_x.clamp(0.0, layout.rotated_width);
+    let clamped_max_x = max_x.clamp(0.0, layout.rotated_width);
+    let clamped_min_y = min_y.clamp(0.0, layout.rotated_height);
+    let clamped_max_y = max_y.clamp(0.0, layout.rotated_height);
+
     normalize_rectangle(Rectangle {
-        left: min_x,
-        right: max_x,
-        top: layout.y_offset + (layout.rotated_height - max_y),
-        bottom: layout.y_offset + (layout.rotated_height - min_y),
+        left: clamped_min_x,
+        right: clamped_max_x,
+        top: layout.y_offset + (layout.rotated_height - clamped_max_y),
+        bottom: layout.y_offset + (layout.rotated_height - clamped_min_y),
     })
 }
 
@@ -2307,11 +2379,16 @@ fn normalize_rectangle(rect: Rectangle) -> Rectangle {
     }
 }
 
+fn is_valid_canonical_rect(rect: &Rectangle) -> bool {
+    rect.left < rect.right && rect.top < rect.bottom
+}
+
 fn walk_page_tree(
     doc: &PdfDoc,
     node: &Object,
     inherited_resources: Option<Object>,
     inherited_media_box: Option<Object>,
+    inherited_crop_box: Option<Object>,
     inherited_rotate: Option<Object>,
     out: &mut Vec<Object>,
 ) {
@@ -2328,6 +2405,10 @@ fn walk_page_tree(
         .get("MediaBox")
         .map(|b| doc.resolve(b).clone())
         .or(inherited_media_box);
+    let crop_box = dict
+        .get("CropBox")
+        .map(|b| doc.resolve(b).clone())
+        .or(inherited_crop_box);
     let rotate = dict
         .get("Rotate")
         .map(|r| doc.resolve(r).clone())
@@ -2341,6 +2422,9 @@ fn walk_page_tree(
                 }
                 if media_box.is_some() && !page_dict.contains_key("MediaBox") {
                     page_dict.insert("MediaBox".to_string(), media_box.clone().unwrap());
+                }
+                if crop_box.is_some() && !page_dict.contains_key("CropBox") {
+                    page_dict.insert("CropBox".to_string(), crop_box.clone().unwrap());
                 }
                 if rotate.is_some() && !page_dict.contains_key("Rotate") {
                     page_dict.insert("Rotate".to_string(), rotate.clone().unwrap());
@@ -2362,6 +2446,7 @@ fn walk_page_tree(
                         kid,
                         resources.clone(),
                         media_box.clone(),
+                        crop_box.clone(),
                         rotate.clone(),
                         out,
                     );

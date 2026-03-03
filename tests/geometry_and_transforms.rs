@@ -94,6 +94,49 @@ fn multi_page_y_is_stacked_and_monotonic() {
 }
 
 #[test]
+fn crop_box_preferred_and_outside_content_clipped_on_stacked_pages() {
+    let doc = load_doc(&edge_pdf("edge_cropbox_clip_stacked_bounds.pdf"));
+    let blocks = extract_text_blocks(&doc);
+    let chars = extract_char_bboxes(&doc);
+
+    let inside = blocks
+        .iter()
+        .find(|b| b.page_index == 1 && b.text == "INSIDECROP")
+        .expect("expected INSIDECROP on page 1");
+    assert!(
+        inside.bbox.left >= 0.0 && inside.bbox.right <= 612.0,
+        "expected INSIDECROP x bounds to stay inside stacked crop width, got {:?}",
+        inside.bbox
+    );
+    assert!(
+        inside.bbox.top >= 792.0 && inside.bbox.bottom <= 1584.0,
+        "expected INSIDECROP y bounds to stay inside stacked page-1 range, got {:?}",
+        inside.bbox
+    );
+
+    assert!(
+        !blocks.iter().any(|b| b.text == "OUTSIDEX"),
+        "expected OUTSIDEX to be fully clipped out by CropBox bounds"
+    );
+    assert!(
+        !blocks.iter().any(|b| b.text == "OUTSIDEY"),
+        "expected OUTSIDEY to be fully clipped out by CropBox bounds"
+    );
+
+    for ch in chars.iter().filter(|ch| ch.page_index == 1) {
+        assert!(
+            ch.bbox.left >= 0.0
+                && ch.bbox.right <= 612.0
+                && ch.bbox.top >= 792.0
+                && ch.bbox.bottom <= 1584.0,
+            "expected page-1 char '{}' within stacked crop bounds, got {:?}",
+            ch.ch,
+            ch.bbox
+        );
+    }
+}
+
+#[test]
 fn form_xobject_words_stay_in_reasonable_bounds() {
     let doc = load_doc(&edge_pdf("edge_form_xobject_transform.pdf"));
     let has_form_xobject = doc.objects.values().any(|obj| {
