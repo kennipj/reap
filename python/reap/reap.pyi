@@ -72,6 +72,8 @@ class TextBlock:
     def rect(self) -> Rectangle: ...
     @property
     def text(self) -> str: ...
+    @property
+    def chars(self) -> list[TextChar]: ...
     def __init__(self, rect: Rectangle, text: str) -> None: ...
 
 class TextChar:
@@ -84,7 +86,6 @@ class TextBlockIndex:
     def __init__(
         self,
         data: str | bytes | bytearray | memoryview | PathLike[str],
-        include_chars: bool = False,
         password: str | bytes | bytearray | memoryview | None = None,
         concurrency: Literal["on", "off", "auto"] = "on",
     ) -> None: ...
@@ -92,7 +93,6 @@ class TextBlockIndex:
     def from_path(
         cls,
         path: str | PathLike[str],
-        include_chars: bool = False,
         password: str | bytes | bytearray | memoryview | None = None,
         concurrency: Literal["on", "off", "auto"] = "on",
     ) -> TextBlockIndex: ...
@@ -114,5 +114,3 @@ class TextBlockIndex:
     def text_blocks(self) -> list[TextBlock]: ...
     @property
     def doc_rect(self) -> Rectangle: ...
-    @property
-    def chars(self) -> list[TextChar]: ...

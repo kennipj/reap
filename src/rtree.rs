@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 use std::collections::VecDeque;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use regex::RegexBuilder;
 
-use crate::text::{Rectangle, TextBlock};
+use crate::text::{CharBBox, Rectangle, TextBlock};
 
 #[derive(Debug, Clone, Copy)]
 pub struct RectF {
@@ -242,6 +242,7 @@ impl LruCache {
 #[derive(Debug)]
 pub struct TextBlockIndex {
     blocks: Vec<TextBlock>,
+    block_chars: Option<Arc<Vec<Vec<CharBBox>>>>,
     rects: Vec<RectF>,
     rtree: RTree,
     cache: LruCache,
@@ -398,10 +399,19 @@ const REGEX_LINE_HEIGHT_RATIO_LIMIT: f64 = 1.5;
 
 impl TextBlockIndex {
     pub fn new(blocks: Vec<TextBlock>) -> Self {
-        Self::from_parts(blocks)
+        Self::from_parts(blocks, None)
     }
 
-    fn from_parts(blocks: Vec<TextBlock>) -> Self {
+    pub fn new_with_chars(blocks: Vec<TextBlock>, block_chars: Vec<Vec<CharBBox>>) -> Self {
+        assert_eq!(
+            blocks.len(),
+            block_chars.len(),
+            "block_chars must align one-to-one with blocks"
+        );
+        Self::from_parts(blocks, Some(Arc::new(block_chars)))
+    }
+
+    fn from_parts(blocks: Vec<TextBlock>, block_chars: Option<Arc<Vec<Vec<CharBBox>>>>) -> Self {
         let rects: Vec<RectF> = blocks
             .iter()
             .map(|b| RectF {
@@ -415,6 +425,7 @@ impl TextBlockIndex {
         let rtree = RTree::build(&rects, 16);
         Self {
             blocks,
+            block_chars,
             rects,
             rtree,
             cache: LruCache::new(1024),
@@ -454,17 +465,41 @@ impl TextBlockIndex {
     ) -> Self {
         let mut indices = self.matching_block_indices(rect, overlap);
         indices.sort_unstable();
-        let mut blocks: Vec<TextBlock> = indices
+        let mut scoped_blocks: Vec<ScopedBlock> = indices
             .into_iter()
-            .map(|index| self.blocks[index].clone())
+            .map(|index| ScopedBlock {
+                block: self.blocks[index].clone(),
+                chars: self
+                    .block_chars
+                    .as_ref()
+                    .and_then(|all| all.get(index))
+                    .cloned()
+                    .unwrap_or_default(),
+            })
             .collect();
         if normalize {
-            blocks = normalize_scoped_blocks(blocks);
+            scoped_blocks = normalize_scoped_blocks(scoped_blocks);
         }
         if merge_threshold > 0.0 {
-            blocks = merge_scoped_blocks(blocks, merge_threshold, rules);
+            scoped_blocks = merge_scoped_blocks(scoped_blocks, merge_threshold, rules);
         }
-        Self::from_parts(blocks)
+        let mut blocks = Vec::with_capacity(scoped_blocks.len());
+        let mut block_chars = Vec::new();
+        let keep_chars = self.block_chars.is_some();
+        if keep_chars {
+            block_chars.reserve(scoped_blocks.len());
+        }
+        for scoped in scoped_blocks {
+            blocks.push(scoped.block);
+            if keep_chars {
+                block_chars.push(scoped.chars);
+            }
+        }
+        if keep_chars {
+            Self::from_parts(blocks, Some(Arc::new(block_chars)))
+        } else {
+            Self::from_parts(blocks, None)
+        }
     }
 
     pub fn blocks(&self) -> Vec<TextBlock> {
@@ -473,6 +508,17 @@ impl TextBlockIndex {
 
     pub fn block_at(&self, index: usize) -> Option<&TextBlock> {
         self.blocks.get(index)
+    }
+
+    pub fn block_chars_at(&self, index: usize) -> Option<&[CharBBox]> {
+        self.block_chars
+            .as_ref()
+            .and_then(|all| all.get(index))
+            .map(Vec::as_slice)
+    }
+
+    pub fn block_chars_arc(&self) -> Option<Arc<Vec<Vec<CharBBox>>>> {
+        self.block_chars.as_ref().map(Arc::clone)
     }
 
     pub fn block_len(&self) -> usize {
@@ -595,20 +641,29 @@ fn doc_rect_from_rects(rects: &[RectF]) -> Rectangle {
     }
 }
 
-fn normalize_scoped_blocks(blocks: Vec<TextBlock>) -> Vec<TextBlock> {
+#[derive(Debug, Clone)]
+struct ScopedBlock {
+    block: TextBlock,
+    chars: Vec<CharBBox>,
+}
+
+fn normalize_scoped_blocks(blocks: Vec<ScopedBlock>) -> Vec<ScopedBlock> {
     if blocks.len() < 2 {
         return blocks;
     }
 
-    let mut per_page: HashMap<usize, Vec<TextBlock>> = HashMap::new();
+    let mut per_page: HashMap<usize, Vec<ScopedBlock>> = HashMap::new();
     for block in blocks {
-        per_page.entry(block.page_index).or_default().push(block);
+        per_page
+            .entry(block.block.page_index)
+            .or_default()
+            .push(block);
     }
 
     let mut page_ids: Vec<usize> = per_page.keys().copied().collect();
     page_ids.sort_unstable();
 
-    let mut normalized: Vec<TextBlock> = Vec::new();
+    let mut normalized: Vec<ScopedBlock> = Vec::new();
     for page_id in page_ids {
         let page_blocks = per_page.remove(&page_id).unwrap_or_default();
         normalized.extend(normalize_page_blocks(page_blocks));
@@ -618,21 +673,22 @@ fn normalize_scoped_blocks(blocks: Vec<TextBlock>) -> Vec<TextBlock> {
     normalized
 }
 
-fn normalize_page_blocks(mut blocks: Vec<TextBlock>) -> Vec<TextBlock> {
+fn normalize_page_blocks(mut blocks: Vec<ScopedBlock>) -> Vec<ScopedBlock> {
     if blocks.len() < 2 {
         return blocks;
     }
 
     blocks.sort_by(|a, b| {
-        a.bbox
+        a.block
+            .bbox
             .top
-            .total_cmp(&b.bbox.top)
-            .then_with(|| a.bbox.left.total_cmp(&b.bbox.left))
-            .then_with(|| a.bbox.right.total_cmp(&b.bbox.right))
+            .total_cmp(&b.block.bbox.top)
+            .then_with(|| a.block.bbox.left.total_cmp(&b.block.bbox.left))
+            .then_with(|| a.block.bbox.right.total_cmp(&b.block.bbox.right))
     });
 
-    let mut normalized: Vec<TextBlock> = Vec::with_capacity(blocks.len());
-    let mut current_line: Vec<TextBlock> = Vec::new();
+    let mut normalized: Vec<ScopedBlock> = Vec::with_capacity(blocks.len());
+    let mut current_line: Vec<ScopedBlock> = Vec::new();
 
     for block in blocks {
         if current_line.is_empty() {
@@ -641,8 +697,8 @@ fn normalize_page_blocks(mut blocks: Vec<TextBlock>) -> Vec<TextBlock> {
         }
 
         let anchor = &current_line[0];
-        let same_line = anchor.bbox.vertical_overlap(&block.bbox, 0.5)
-            || block.bbox.vertical_overlap(&anchor.bbox, 0.5);
+        let same_line = anchor.block.bbox.vertical_overlap(&block.block.bbox, 0.5)
+            || block.block.bbox.vertical_overlap(&anchor.block.bbox, 0.5);
         if same_line {
             current_line.push(block);
             continue;
@@ -659,7 +715,7 @@ fn normalize_page_blocks(mut blocks: Vec<TextBlock>) -> Vec<TextBlock> {
     normalized
 }
 
-fn normalize_line_blocks(mut line: Vec<TextBlock>) -> Vec<TextBlock> {
+fn normalize_line_blocks(mut line: Vec<ScopedBlock>) -> Vec<ScopedBlock> {
     if line.len() < 2 {
         return line;
     }
@@ -667,26 +723,26 @@ fn normalize_line_blocks(mut line: Vec<TextBlock>) -> Vec<TextBlock> {
     let mut top_sum = 0.0;
     let mut bottom_sum = 0.0;
     for block in &line {
-        top_sum += block.bbox.top.min(block.bbox.bottom);
-        bottom_sum += block.bbox.top.max(block.bbox.bottom);
+        top_sum += block.block.bbox.top.min(block.block.bbox.bottom);
+        bottom_sum += block.block.bbox.top.max(block.block.bbox.bottom);
     }
     let n = line.len() as f64;
     let avg_top = top_sum / n;
     let avg_bottom = bottom_sum / n;
 
     for block in &mut line {
-        block.bbox.top = avg_top;
-        block.bbox.bottom = avg_bottom;
+        block.block.bbox.top = avg_top;
+        block.block.bbox.bottom = avg_bottom;
     }
 
     line
 }
 
 fn merge_scoped_blocks(
-    blocks: Vec<TextBlock>,
+    blocks: Vec<ScopedBlock>,
     merge_threshold: f64,
     rules: ScopedMergeRules,
-) -> Vec<TextBlock> {
+) -> Vec<ScopedBlock> {
     if blocks.len() < 2 {
         return blocks;
     }
@@ -696,15 +752,18 @@ fn merge_scoped_blocks(
         return blocks;
     }
 
-    let mut per_page: HashMap<usize, Vec<TextBlock>> = HashMap::new();
+    let mut per_page: HashMap<usize, Vec<ScopedBlock>> = HashMap::new();
     for block in blocks {
-        per_page.entry(block.page_index).or_default().push(block);
+        per_page
+            .entry(block.block.page_index)
+            .or_default()
+            .push(block);
     }
 
     let mut page_ids: Vec<usize> = per_page.keys().copied().collect();
     page_ids.sort_unstable();
 
-    let mut merged: Vec<TextBlock> = Vec::new();
+    let mut merged: Vec<ScopedBlock> = Vec::new();
     for page_id in page_ids {
         let page_blocks = per_page.remove(&page_id).unwrap_or_default();
         merged.extend(merge_page_blocks(page_blocks, merge_threshold, rules));
@@ -714,13 +773,14 @@ fn merge_scoped_blocks(
     merged
 }
 
-fn sort_blocks_for_reading_order(blocks: &mut [TextBlock]) {
+fn sort_blocks_for_reading_order(blocks: &mut [ScopedBlock]) {
     blocks.sort_by(|a, b| {
-        a.page_index
-            .cmp(&b.page_index)
-            .then_with(|| a.bbox.top.total_cmp(&b.bbox.top))
-            .then_with(|| a.bbox.left.total_cmp(&b.bbox.left))
-            .then_with(|| a.bbox.right.total_cmp(&b.bbox.right))
+        a.block
+            .page_index
+            .cmp(&b.block.page_index)
+            .then_with(|| a.block.bbox.top.total_cmp(&b.block.bbox.top))
+            .then_with(|| a.block.bbox.left.total_cmp(&b.block.bbox.left))
+            .then_with(|| a.block.bbox.right.total_cmp(&b.block.bbox.right))
     });
 }
 
@@ -766,24 +826,24 @@ impl DisjointSet {
 }
 
 fn merge_page_blocks(
-    blocks: Vec<TextBlock>,
+    blocks: Vec<ScopedBlock>,
     merge_threshold: f64,
     rules: ScopedMergeRules,
-) -> Vec<TextBlock> {
+) -> Vec<ScopedBlock> {
     if blocks.len() < 2 {
         return blocks;
     }
 
     let classes: Vec<BlockClass> = blocks
         .iter()
-        .map(|block| classify_block_text(&block.text))
+        .map(|block| classify_block_text(&block.block.text))
         .collect();
     let spans: Vec<(f64, f64)> = blocks
         .iter()
         .map(|block| {
             (
-                block.bbox.left.min(block.bbox.right),
-                block.bbox.left.max(block.bbox.right),
+                block.block.bbox.left.min(block.block.bbox.right),
+                block.block.bbox.left.max(block.block.bbox.right),
             )
         })
         .collect();
@@ -793,7 +853,13 @@ fn merge_page_blocks(
             .0
             .total_cmp(&spans[b].0)
             .then_with(|| spans[a].1.total_cmp(&spans[b].1))
-            .then_with(|| blocks[a].bbox.top.total_cmp(&blocks[b].bbox.top))
+            .then_with(|| {
+                blocks[a]
+                    .block
+                    .bbox
+                    .top
+                    .total_cmp(&blocks[b].block.bbox.top)
+            })
             .then_with(|| a.cmp(&b))
     });
 
@@ -804,9 +870,9 @@ fn merge_page_blocks(
         active.retain(|&candidate| spans[candidate].1 + merge_threshold >= curr_left);
         for &candidate in &active {
             if blocks_are_mergeable(
-                &blocks[curr],
+                &blocks[curr].block,
                 classes[curr],
-                &blocks[candidate],
+                &blocks[candidate].block,
                 classes[candidate],
                 merge_threshold,
                 rules,
@@ -829,7 +895,7 @@ fn merge_page_blocks(
         a_min.cmp(&b_min)
     });
 
-    let mut merged: Vec<TextBlock> = Vec::with_capacity(components.len());
+    let mut merged: Vec<ScopedBlock> = Vec::with_capacity(components.len());
     for component in components {
         merged.push(merge_component(&blocks, &component));
     }
@@ -1073,30 +1139,36 @@ fn horizontal_gap(a: Rectangle, b: Rectangle) -> f64 {
     a_left - b_right
 }
 
-fn merge_component(blocks: &[TextBlock], component: &[usize]) -> TextBlock {
-    let mut members: Vec<&TextBlock> = component.iter().map(|&index| &blocks[index]).collect();
+fn merge_component(blocks: &[ScopedBlock], component: &[usize]) -> ScopedBlock {
+    let mut members: Vec<&ScopedBlock> = component.iter().map(|&index| &blocks[index]).collect();
     members.sort_by(|a, b| {
-        a.bbox
+        a.block
+            .bbox
             .left
-            .total_cmp(&b.bbox.left)
-            .then_with(|| a.bbox.top.total_cmp(&b.bbox.top))
-            .then_with(|| a.bbox.right.total_cmp(&b.bbox.right))
+            .total_cmp(&b.block.bbox.left)
+            .then_with(|| a.block.bbox.top.total_cmp(&b.block.bbox.top))
+            .then_with(|| a.block.bbox.right.total_cmp(&b.block.bbox.right))
     });
 
     let first = members[0];
     let mut text = String::new();
-    let mut bbox = first.bbox;
+    let mut bbox = first.block.bbox;
+    let mut chars = Vec::new();
     for (idx, block) in members.iter().enumerate() {
         if idx > 0 {
             text.push(' ');
         }
-        text.push_str(&block.text);
-        bbox = union_rectangles(bbox, block.bbox);
+        text.push_str(&block.block.text);
+        bbox = union_rectangles(bbox, block.block.bbox);
+        chars.extend(block.chars.iter().cloned());
     }
-    TextBlock {
-        page_index: first.page_index,
-        text,
-        bbox,
+    ScopedBlock {
+        block: TextBlock {
+            page_index: first.block.page_index,
+            text,
+            bbox,
+        },
+        chars,
     }
 }
 
@@ -1316,7 +1388,8 @@ fn union_rectangles(a: Rectangle, b: Rectangle) -> Rectangle {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_date_token, is_numeric_token};
+    use super::{ScopedMergeRules, TextBlockIndex, is_date_token, is_numeric_token};
+    use crate::text::{CharBBox, Rectangle, TextBlock};
 
     #[test]
     fn numeric_token_detector_matches_expected_cases() {
@@ -1363,5 +1436,141 @@ mod tests {
         for value in ["", "2024/01/02", "1/2", "1/2/20245", "1//2024", "abc"] {
             assert!(!is_date_token(value), "expected non-date token: {}", value);
         }
+    }
+
+    fn make_block(
+        page_index: usize,
+        text: &str,
+        top: f64,
+        left: f64,
+        bottom: f64,
+        right: f64,
+    ) -> TextBlock {
+        TextBlock {
+            page_index,
+            text: text.to_string(),
+            bbox: Rectangle {
+                top,
+                left,
+                bottom,
+                right,
+            },
+        }
+    }
+
+    fn make_char(
+        page_index: usize,
+        ch: char,
+        top: f64,
+        left: f64,
+        bottom: f64,
+        right: f64,
+    ) -> CharBBox {
+        CharBBox {
+            page_index,
+            ch,
+            bbox: Rectangle {
+                top,
+                left,
+                bottom,
+                right,
+            },
+        }
+    }
+
+    #[test]
+    fn scoped_merge_concatenates_chars_without_synthetic_spaces() {
+        let blocks = vec![
+            make_block(0, "AB", 10.0, 10.0, 20.0, 20.0),
+            make_block(0, "CD", 10.0, 21.0, 20.0, 30.0),
+        ];
+        let block_chars = vec![
+            vec![
+                make_char(0, 'A', 10.0, 10.0, 20.0, 14.0),
+                make_char(0, 'B', 10.0, 14.0, 20.0, 20.0),
+            ],
+            vec![
+                make_char(0, 'C', 10.0, 21.0, 20.0, 25.0),
+                make_char(0, 'D', 10.0, 25.0, 20.0, 30.0),
+            ],
+        ];
+        let index = TextBlockIndex::new_with_chars(blocks, block_chars);
+        let scoped = index.scoped(
+            Rectangle {
+                top: 0.0,
+                left: 0.0,
+                bottom: 100.0,
+                right: 100.0,
+            },
+            0.0,
+            5.0,
+            false,
+            ScopedMergeRules::default(),
+        );
+        assert_eq!(scoped.block_len(), 1);
+        assert_eq!(
+            scoped.block_at(0).map(|block| block.text.as_str()),
+            Some("AB CD")
+        );
+        let chars = scoped
+            .block_chars_at(0)
+            .expect("expected merged block chars to be present")
+            .iter()
+            .map(|ch| ch.ch)
+            .collect::<String>();
+        assert_eq!(chars, "ABCD");
+    }
+
+    #[test]
+    fn scoped_normalize_preserves_char_attachment_per_block() {
+        let blocks = vec![
+            make_block(0, "LOW", 40.0, 10.0, 50.0, 20.0),
+            make_block(0, "HIGH", 10.0, 10.0, 20.0, 20.0),
+        ];
+        let block_chars = vec![
+            vec![
+                make_char(0, 'L', 40.0, 10.0, 50.0, 13.0),
+                make_char(0, 'W', 40.0, 17.0, 50.0, 20.0),
+            ],
+            vec![
+                make_char(0, 'H', 10.0, 10.0, 20.0, 13.0),
+                make_char(0, 'I', 10.0, 13.0, 20.0, 16.0),
+            ],
+        ];
+        let index = TextBlockIndex::new_with_chars(blocks, block_chars);
+        let scoped = index.scoped(
+            Rectangle {
+                top: 0.0,
+                left: 0.0,
+                bottom: 100.0,
+                right: 100.0,
+            },
+            0.0,
+            0.0,
+            true,
+            ScopedMergeRules::default(),
+        );
+        assert_eq!(
+            scoped.block_at(0).map(|block| block.text.as_str()),
+            Some("HIGH")
+        );
+        assert_eq!(
+            scoped.block_at(1).map(|block| block.text.as_str()),
+            Some("LOW")
+        );
+        let first_chars = scoped
+            .block_chars_at(0)
+            .expect("expected chars for first normalized block")
+            .iter()
+            .map(|ch| ch.ch)
+            .collect::<String>();
+        let second_chars = scoped
+            .block_chars_at(1)
+            .expect("expected chars for second normalized block")
+            .iter()
+            .map(|ch| ch.ch)
+            .collect::<String>();
+        assert_eq!(first_chars, "HI");
+        assert_eq!(second_chars, "LW");
     }
 }

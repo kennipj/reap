@@ -2,6 +2,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::{Arc, OnceLock};
 
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes, PyList, PyModule, PyType};
@@ -10,12 +11,12 @@ use crate::parser::{ParseError, Parser};
 use crate::rtree::{RegexSearchError, ScopedMergeRules, TextBlockIndex as RsTextBlockIndex};
 use crate::text::{
     CharBBox, ExpandDirection, ExpandError, ExtractParallelMode, Rectangle as RsRectangle,
-    extract_char_bboxes_with_parallel_mode, extract_text_blocks_with_parallel_mode,
+    extract_text_blocks_with_chars_with_parallel_mode,
 };
 use crate::tokenizer::Lexer;
 
 #[pyclass]
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 struct Rectangle {
     #[pyo3(get, set)]
     top: f64,
@@ -76,12 +77,15 @@ impl Point {
 }
 
 #[pyclass]
-#[derive(Clone, PartialEq)]
+#[derive(Clone)]
 struct TextBlock {
     #[pyo3(get)]
     rect: Rectangle,
     #[pyo3(get)]
     text: String,
+    chars_backing: Option<Arc<Vec<Vec<CharBBox>>>>,
+    chars_source: BlockCharSource,
+    chars_cache: OnceLock<Vec<CharBBox>>,
 }
 
 #[pyclass]
@@ -91,6 +95,13 @@ struct TextChar {
     rect: Rectangle,
     #[pyo3(get)]
     ch: String,
+}
+
+#[derive(Clone)]
+enum BlockCharSource {
+    None,
+    Single(usize),
+    Multi(Vec<usize>),
 }
 
 #[pymethods]
@@ -276,7 +287,6 @@ impl Rectangle {
 #[pyclass(unsendable)]
 struct TextBlockIndex {
     inner: RefCell<RsTextBlockIndex>,
-    chars: Option<Vec<CharBBox>>,
     py_blocks: RefCell<Vec<Option<Py<TextBlock>>>>,
     regex_py_cache: RefCell<HashMap<String, Vec<Py<TextBlock>>>>,
 }
@@ -284,36 +294,23 @@ struct TextBlockIndex {
 #[pymethods]
 impl TextBlockIndex {
     #[new]
-    #[pyo3(signature = (obj, include_chars=false, password=None, concurrency="on"))]
+    #[pyo3(signature = (obj, password=None, concurrency="on"))]
     fn new(
         py: Python<'_>,
         obj: &Bound<'_, PyAny>,
-        include_chars: bool,
         password: Option<&Bound<'_, PyAny>>,
         concurrency: &str,
     ) -> PyResult<Self> {
         let password = extract_password_bytes(password)?;
         let parallel_mode = map_concurrency_to_parallel_mode(concurrency)?;
         if let Ok(py_bytes) = obj.cast::<PyBytes>() {
-            return Self::from_bytes(
-                py,
-                py_bytes.as_bytes(),
-                include_chars,
-                password.as_deref(),
-                parallel_mode,
-            );
+            return Self::from_bytes(py, py_bytes.as_bytes(), password.as_deref(), parallel_mode);
         }
         if let Ok(bytes) = obj.extract::<&[u8]>() {
-            return Self::from_bytes(py, bytes, include_chars, password.as_deref(), parallel_mode);
+            return Self::from_bytes(py, bytes, password.as_deref(), parallel_mode);
         }
         if let Ok(bytes) = obj.extract::<Vec<u8>>() {
-            return Self::from_bytes(
-                py,
-                &bytes,
-                include_chars,
-                password.as_deref(),
-                parallel_mode,
-            );
+            return Self::from_bytes(py, &bytes, password.as_deref(), parallel_mode);
         }
 
         let path = if obj.hasattr("__fspath__")? {
@@ -333,16 +330,15 @@ impl TextBlockIndex {
         let lexer = Lexer::from_file(&path).map_err(|e| {
             pyo3::exceptions::PyIOError::new_err(format!("failed to read {}: {}", path, e))
         })?;
-        Self::from_lexer(py, lexer, include_chars, password.as_deref(), parallel_mode)
+        Self::from_lexer(py, lexer, password.as_deref(), parallel_mode)
     }
 
     #[classmethod]
-    #[pyo3(signature = (path, include_chars=false, password=None, concurrency="on"))]
+    #[pyo3(signature = (path, password=None, concurrency="on"))]
     fn from_path(
         _cls: &Bound<'_, PyType>,
         py: Python<'_>,
         path: &str,
-        include_chars: bool,
         password: Option<&Bound<'_, PyAny>>,
         concurrency: &str,
     ) -> PyResult<Self> {
@@ -351,7 +347,7 @@ impl TextBlockIndex {
         let lexer = Lexer::from_file(path).map_err(|e| {
             pyo3::exceptions::PyIOError::new_err(format!("failed to read {}: {}", path, e))
         })?;
-        Self::from_lexer(py, lexer, include_chars, password.as_deref(), parallel_mode)
+        Self::from_lexer(py, lexer, password.as_deref(), parallel_mode)
     }
 
     fn search(&self, py: Python<'_>, rect: &Rectangle, overlap: f64) -> PyResult<Py<PyAny>> {
@@ -390,6 +386,7 @@ impl TextBlockIndex {
 
         let mut py_matches: Vec<Py<TextBlock>> = Vec::with_capacity(matches.len());
         let inner = self.inner.borrow();
+        let shared_block_chars = inner.block_chars_arc();
         for block_indices in matches {
             if block_indices.len() == 1 {
                 if let Some(existing) = self.py_block_at(py, block_indices[0])? {
@@ -399,7 +396,7 @@ impl TextBlockIndex {
             }
 
             let mut merged: Option<crate::text::TextBlock> = None;
-            for index in block_indices {
+            for index in block_indices.iter().copied() {
                 let Some(block) = inner.block_at(index) else {
                     continue;
                 };
@@ -417,7 +414,17 @@ impl TextBlockIndex {
                 });
             }
             if let Some(block) = merged {
-                py_matches.push(block_to_py_object(py, &block)?);
+                let chars_source = if shared_block_chars.is_some() {
+                    BlockCharSource::Multi(block_indices)
+                } else {
+                    BlockCharSource::None
+                };
+                py_matches.push(block_to_py_object(
+                    py,
+                    &block,
+                    shared_block_chars.clone(),
+                    chars_source,
+                )?);
             }
         }
 
@@ -467,14 +474,9 @@ impl TextBlockIndex {
             self.inner
                 .borrow()
                 .scoped(core_rect, overlap, merge_threshold, normalize, rules);
-        let chars = self
-            .chars
-            .as_ref()
-            .map(|chars| filter_chars_by_scope(chars, core_rect, overlap));
         let py_blocks = (0..scoped_inner.block_len()).map(|_| None).collect();
         Ok(Self {
             inner: RefCell::new(scoped_inner),
-            chars,
             py_blocks: RefCell::new(py_blocks),
             regex_py_cache: RefCell::new(HashMap::new()),
         })
@@ -507,60 +509,23 @@ impl TextBlockIndex {
             right: rect.right,
         }
     }
-
-    #[getter]
-    fn chars(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let chars = self.chars.as_ref().ok_or_else(|| {
-            pyo3::exceptions::PyRuntimeError::new_err(
-                "chars were not collected for this TextBlockIndex; construct with include_chars=True",
-            )
-        })?;
-
-        let out = PyList::empty(py);
-        for ch in chars {
-            let rect = Rectangle {
-                top: ch.bbox.top,
-                left: ch.bbox.left,
-                bottom: ch.bbox.bottom,
-                right: ch.bbox.right,
-            };
-            let item = Py::new(
-                py,
-                TextChar {
-                    rect,
-                    ch: ch.ch.to_string(),
-                },
-            )?;
-            out.append(item)?;
-        }
-        Ok(out.into_any().unbind())
-    }
 }
 
 impl TextBlockIndex {
     fn from_bytes(
         _py: Python<'_>,
         bytes: &[u8],
-        include_chars: bool,
         password: Option<&[u8]>,
         parallel_mode: ExtractParallelMode,
     ) -> PyResult<Self> {
         let doc = Parser::new(Lexer::new(bytes))
             .parse_with_password(password)
             .map_err(parse_error_to_py)?;
-        let chars = if include_chars {
-            Some(extract_char_bboxes_with_parallel_mode(
-                &doc,
-                Some(parallel_mode),
-            ))
-        } else {
-            None
-        };
-        let blocks = extract_text_blocks_with_parallel_mode(&doc, Some(parallel_mode));
+        let (blocks, block_chars) =
+            extract_text_blocks_with_chars_with_parallel_mode(&doc, Some(parallel_mode));
         let py_blocks = (0..blocks.len()).map(|_| None).collect();
         Ok(Self {
-            inner: RefCell::new(RsTextBlockIndex::new(blocks)),
-            chars,
+            inner: RefCell::new(RsTextBlockIndex::new_with_chars(blocks, block_chars)),
             py_blocks: RefCell::new(py_blocks),
             regex_py_cache: RefCell::new(HashMap::new()),
         })
@@ -569,26 +534,17 @@ impl TextBlockIndex {
     fn from_lexer(
         _py: Python<'_>,
         lexer: Lexer,
-        include_chars: bool,
         password: Option<&[u8]>,
         parallel_mode: ExtractParallelMode,
     ) -> PyResult<Self> {
         let doc = Parser::new(lexer)
             .parse_with_password(password)
             .map_err(parse_error_to_py)?;
-        let chars = if include_chars {
-            Some(extract_char_bboxes_with_parallel_mode(
-                &doc,
-                Some(parallel_mode),
-            ))
-        } else {
-            None
-        };
-        let blocks = extract_text_blocks_with_parallel_mode(&doc, Some(parallel_mode));
+        let (blocks, block_chars) =
+            extract_text_blocks_with_chars_with_parallel_mode(&doc, Some(parallel_mode));
         let py_blocks = (0..blocks.len()).map(|_| None).collect();
         Ok(Self {
-            inner: RefCell::new(RsTextBlockIndex::new(blocks)),
-            chars,
+            inner: RefCell::new(RsTextBlockIndex::new_with_chars(blocks, block_chars)),
             py_blocks: RefCell::new(py_blocks),
             regex_py_cache: RefCell::new(HashMap::new()),
         })
@@ -607,12 +563,20 @@ impl TextBlockIndex {
 
         let block = {
             let inner = self.inner.borrow();
-            inner.block_at(index).cloned()
+            let block = inner.block_at(index).cloned();
+            let chars_backing = inner.block_chars_arc();
+            (block, chars_backing)
         };
+        let (block, chars_backing) = block;
         let Some(block) = block else {
             return Ok(None);
         };
-        let py_block = block_to_py_object(py, &block)?;
+        let chars_source = if chars_backing.is_some() {
+            BlockCharSource::Single(index)
+        } else {
+            BlockCharSource::None
+        };
+        let py_block = block_to_py_object(py, &block, chars_backing, chars_source)?;
 
         let mut py_blocks = self.py_blocks.borrow_mut();
         let Some(slot) = py_blocks.get_mut(index) else {
@@ -680,16 +644,28 @@ fn expand_error_to_py(err: ExpandError) -> PyErr {
     }
 }
 
-fn filter_chars_by_scope(chars: &[CharBBox], rect: RsRectangle, overlap: f64) -> Vec<CharBBox> {
-    let overlap = overlap.clamp(0.00001, 1.0);
-    chars
-        .iter()
-        .filter(|ch| ch.bbox.overlap_percentage(&rect) >= overlap)
-        .cloned()
-        .collect()
+fn char_to_py_object(py: Python<'_>, ch: &CharBBox) -> PyResult<Py<TextChar>> {
+    let rect = Rectangle {
+        top: ch.bbox.top,
+        left: ch.bbox.left,
+        bottom: ch.bbox.bottom,
+        right: ch.bbox.right,
+    };
+    Py::new(
+        py,
+        TextChar {
+            rect,
+            ch: ch.ch.to_string(),
+        },
+    )
 }
 
-fn block_to_py_object(py: Python<'_>, b: &crate::text::TextBlock) -> PyResult<Py<TextBlock>> {
+fn block_to_py_object(
+    py: Python<'_>,
+    b: &crate::text::TextBlock,
+    chars_backing: Option<Arc<Vec<Vec<CharBBox>>>>,
+    chars_source: BlockCharSource,
+) -> PyResult<Py<TextBlock>> {
     let rect = Rectangle {
         top: b.bbox.top,
         left: b.bbox.left,
@@ -701,6 +677,9 @@ fn block_to_py_object(py: Python<'_>, b: &crate::text::TextBlock) -> PyResult<Py
         TextBlock {
             rect,
             text: b.text.clone(),
+            chars_backing,
+            chars_source,
+            chars_cache: OnceLock::new(),
         },
     )
 }
@@ -709,7 +688,23 @@ fn block_to_py_object(py: Python<'_>, b: &crate::text::TextBlock) -> PyResult<Py
 impl TextBlock {
     #[new]
     fn new(rect: Rectangle, text: String) -> Self {
-        Self { rect, text }
+        Self {
+            rect,
+            text,
+            chars_backing: None,
+            chars_source: BlockCharSource::None,
+            chars_cache: OnceLock::new(),
+        }
+    }
+
+    #[getter]
+    fn chars(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let chars = self.chars_cache.get_or_init(|| self.materialize_chars());
+        let out = PyList::empty(py);
+        for ch in chars {
+            out.append(char_to_py_object(py, ch)?)?;
+        }
+        Ok(out.into_any().unbind())
     }
 
     fn __repr__(&self) -> String {
@@ -718,6 +713,31 @@ impl TextBlock {
 
     fn __eq__(&self, other: &TextBlock) -> bool {
         self.rect == other.rect && self.text == other.text
+    }
+}
+
+impl TextBlock {
+    fn materialize_chars(&self) -> Vec<CharBBox> {
+        let Some(backing) = self.chars_backing.as_ref() else {
+            return Vec::new();
+        };
+        match &self.chars_source {
+            BlockCharSource::None => Vec::new(),
+            BlockCharSource::Single(index) => backing.get(*index).cloned().unwrap_or_default(),
+            BlockCharSource::Multi(indices) => {
+                let total = indices
+                    .iter()
+                    .map(|index| backing.get(*index).map_or(0, Vec::len))
+                    .sum();
+                let mut out = Vec::with_capacity(total);
+                for index in indices {
+                    if let Some(chars) = backing.get(*index) {
+                        out.extend_from_slice(chars);
+                    }
+                }
+                out
+            }
+        }
     }
 }
 
@@ -750,7 +770,23 @@ fn reap(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::Rectangle;
+    use std::sync::Arc;
+
+    use super::{BlockCharSource, Rectangle, TextBlock};
+    use crate::text::CharBBox;
+
+    fn make_char(ch: char, left: f64, right: f64) -> CharBBox {
+        CharBBox {
+            page_index: 0,
+            ch,
+            bbox: crate::text::Rectangle {
+                top: 0.0,
+                left,
+                bottom: 10.0,
+                right,
+            },
+        }
+    }
 
     #[test]
     fn rectangle_with_coords_replaces_only_specified_values() {
@@ -833,5 +869,44 @@ mod tests {
             err.to_string(),
             "ValueError: maximum_bounds must fully contain the rectangle being expanded"
         );
+    }
+
+    #[test]
+    fn text_block_materialize_chars_uses_single_source_without_copying_spaces() {
+        let backing = Arc::new(vec![
+            vec![make_char('A', 0.0, 5.0), make_char('B', 5.0, 10.0)],
+            vec![make_char('C', 10.0, 15.0)],
+        ]);
+        let block = TextBlock {
+            rect: Rectangle::new(0.0, 0.0, 10.0, 10.0),
+            text: "AB".to_string(),
+            chars_backing: Some(backing),
+            chars_source: BlockCharSource::Single(0),
+            chars_cache: std::sync::OnceLock::new(),
+        };
+        let text = block
+            .materialize_chars()
+            .iter()
+            .map(|ch| ch.ch)
+            .collect::<String>();
+        assert_eq!(text, "AB");
+    }
+
+    #[test]
+    fn text_block_materialize_chars_merges_sources_in_order_without_synthetic_space_chars() {
+        let backing = Arc::new(vec![
+            vec![make_char('A', 0.0, 5.0), make_char('B', 5.0, 10.0)],
+            vec![make_char('C', 12.0, 17.0), make_char('D', 17.0, 22.0)],
+        ]);
+        let block = TextBlock {
+            rect: Rectangle::new(0.0, 0.0, 10.0, 22.0),
+            text: "AB CD".to_string(),
+            chars_backing: Some(backing),
+            chars_source: BlockCharSource::Multi(vec![0, 1]),
+            chars_cache: std::sync::OnceLock::new(),
+        };
+        let chars = block.materialize_chars();
+        let text = chars.iter().map(|ch| ch.ch).collect::<String>();
+        assert_eq!(text, "ABCD");
     }
 }

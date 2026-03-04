@@ -460,14 +460,14 @@ pub enum ExpandError {
     InvalidMaximumBounds,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CharBBox {
     pub page_index: usize,
     pub ch: char,
     pub bbox: Rectangle,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TextBlock {
     pub page_index: usize,
     pub text: String,
@@ -1071,39 +1071,6 @@ fn extract_char_bboxes_raw_serial_from_pages(doc: &PdfDoc, pages: &[Object]) -> 
     out
 }
 
-fn flush_current_text_block(
-    out_blocks: &mut Vec<TextBlock>,
-    cur_text: &mut String,
-    cur_page: &mut Option<usize>,
-    cur_bbox: &mut Option<Rect>,
-) {
-    if cur_text.is_empty() {
-        return;
-    }
-    if is_discardable_block(cur_text) {
-        cur_text.clear();
-        *cur_page = None;
-        *cur_bbox = None;
-        return;
-    }
-    if let (Some(page), Some(b)) = (cur_page.take(), cur_bbox.take()) {
-        out_blocks.push(TextBlock {
-            page_index: page,
-            text: std::mem::take(cur_text),
-            bbox: Rectangle {
-                left: b.min_x,
-                top: b.min_y,
-                right: b.max_x,
-                bottom: b.max_y,
-            },
-        });
-    } else {
-        cur_text.clear();
-        *cur_page = None;
-        *cur_bbox = None;
-    }
-}
-
 fn is_discardable_block(text: &str) -> bool {
     text.chars().count() >= 3 && text.chars().all(|ch| ch == '_' || ch == '-')
 }
@@ -1120,8 +1087,11 @@ fn word_gap_thresholds(prev_height: f64) -> (f64, f64) {
 
 #[derive(Default)]
 struct BlockAccumulator {
+    capture_chars: bool,
     out_blocks: Vec<TextBlock>,
+    out_block_chars: Vec<Vec<CharBBox>>,
     cur_text: String,
+    cur_chars: Vec<CharBBox>,
     cur_page: Option<usize>,
     cur_bbox: Option<Rect>,
     prev_bbox: Option<Rect>,
@@ -1130,19 +1100,60 @@ struct BlockAccumulator {
 }
 
 impl BlockAccumulator {
+    fn new(capture_chars: bool) -> Self {
+        Self {
+            capture_chars,
+            ..Self::default()
+        }
+    }
+
+    fn flush_current_text_block(&mut self) {
+        if self.cur_text.is_empty() {
+            self.cur_chars.clear();
+            return;
+        }
+        if is_discardable_block(&self.cur_text) {
+            self.cur_text.clear();
+            self.cur_chars.clear();
+            self.cur_page = None;
+            self.cur_bbox = None;
+            return;
+        }
+        if let (Some(page), Some(b)) = (self.cur_page.take(), self.cur_bbox.take()) {
+            self.out_blocks.push(TextBlock {
+                page_index: page,
+                text: std::mem::take(&mut self.cur_text),
+                bbox: Rectangle {
+                    left: b.min_x,
+                    top: b.min_y,
+                    right: b.max_x,
+                    bottom: b.max_y,
+                },
+            });
+            if self.capture_chars {
+                self.out_block_chars
+                    .push(std::mem::take(&mut self.cur_chars));
+            } else {
+                self.cur_chars.clear();
+            }
+        } else {
+            self.cur_text.clear();
+            self.cur_chars.clear();
+            self.cur_page = None;
+            self.cur_bbox = None;
+        }
+    }
+
     fn push_whitespace(&mut self) {
-        flush_current_text_block(
-            &mut self.out_blocks,
-            &mut self.cur_text,
-            &mut self.cur_page,
-            &mut self.cur_bbox,
-        );
+        self.flush_current_text_block();
         self.prev_bbox = None;
         self.prev_font_size = None;
         self.prev_ch = None;
     }
 
     fn push_char(&mut self, ch: CharBBox, font_size: f64) {
+        let page_index = ch.page_index;
+        let ch_value = ch.ch;
         let bbox = Rect {
             min_x: ch.bbox.left,
             min_y: ch.bbox.top,
@@ -1151,7 +1162,7 @@ impl BlockAccumulator {
         };
         let mut split = false;
         if let Some(prev) = self.prev_bbox {
-            if self.cur_page != Some(ch.page_index) {
+            if self.cur_page != Some(page_index) {
                 split = true;
             } else {
                 let prev_h = (prev.max_y - prev.min_y).abs();
@@ -1172,7 +1183,7 @@ impl BlockAccumulator {
                     split = true;
                 } else if gap > WORD_POS_GAP_MIN
                     && self.prev_ch.is_some_and(|prev| prev.is_lowercase())
-                    && ch.ch.is_uppercase()
+                    && ch_value.is_uppercase()
                 {
                     // Preserve intended boundaries in compact labels like "Tips Reported"
                     // when spacing exists but no explicit whitespace character is present.
@@ -1187,46 +1198,43 @@ impl BlockAccumulator {
         }
 
         if split && !self.cur_text.is_empty() {
-            flush_current_text_block(
-                &mut self.out_blocks,
-                &mut self.cur_text,
-                &mut self.cur_page,
-                &mut self.cur_bbox,
-            );
+            self.flush_current_text_block();
         }
 
         if self.cur_text.is_empty() {
-            self.cur_text.push(ch.ch);
-            self.cur_page = Some(ch.page_index);
+            self.cur_text.push(ch_value);
+            self.cur_page = Some(page_index);
             self.cur_bbox = Some(bbox);
-        } else if self.cur_page != Some(ch.page_index) {
-            flush_current_text_block(
-                &mut self.out_blocks,
-                &mut self.cur_text,
-                &mut self.cur_page,
-                &mut self.cur_bbox,
-            );
-            self.cur_text.push(ch.ch);
-            self.cur_page = Some(ch.page_index);
+        } else if self.cur_page != Some(page_index) {
+            self.flush_current_text_block();
+            self.cur_text.push(ch_value);
+            self.cur_page = Some(page_index);
             self.cur_bbox = Some(bbox);
         } else if let Some(existing) = self.cur_bbox {
-            self.cur_text.push(ch.ch);
+            self.cur_text.push(ch_value);
             self.cur_bbox = Some(existing.union(bbox));
         }
 
+        if self.capture_chars {
+            self.cur_chars.push(ch);
+        }
         self.prev_bbox = Some(bbox);
         self.prev_font_size = Some(font_size);
-        self.prev_ch = Some(ch.ch);
+        self.prev_ch = Some(ch_value);
     }
 
     fn finish(mut self) -> Vec<TextBlock> {
-        flush_current_text_block(
-            &mut self.out_blocks,
-            &mut self.cur_text,
-            &mut self.cur_page,
-            &mut self.cur_bbox,
-        );
+        self.flush_current_text_block();
         self.out_blocks
+    }
+
+    fn finish_with_chars(mut self) -> (Vec<TextBlock>, Vec<Vec<CharBBox>>) {
+        self.flush_current_text_block();
+        if self.capture_chars {
+            (self.out_blocks, self.out_block_chars)
+        } else {
+            (self.out_blocks, Vec::new())
+        }
     }
 }
 
@@ -1271,6 +1279,51 @@ fn extract_text_blocks_for_page(doc: &PdfDoc, page_index: usize, page: &Object) 
     blocks.finish()
 }
 
+fn extract_text_blocks_with_chars_for_page(
+    doc: &PdfDoc,
+    page_index: usize,
+    page: &Object,
+) -> (Vec<TextBlock>, Vec<Vec<CharBBox>>) {
+    let mut blocks = BlockAccumulator::new(true);
+    let mut font_map_cache: FontMapCache = HashMap::new();
+    let mut decoded_stream_cache = DecodedStreamCache::default();
+    let page_clip = page_clip_rect(doc, page);
+    let (resources, contents) = page_resources_and_contents(doc, page);
+    let content_bytes = decode_contents(doc, &contents, &mut decoded_stream_cache);
+    let ctm = Matrix::identity();
+    let text_state = TextState::new();
+    process_content_with_blocks(
+        doc,
+        page_index,
+        resources,
+        &content_bytes,
+        ctm,
+        text_state,
+        page_clip,
+        &mut font_map_cache,
+        &mut decoded_stream_cache,
+        &mut blocks,
+    );
+    for (bytes, ann_resources, ann_matrix) in
+        annotation_appearance_streams(doc, page, &mut decoded_stream_cache)
+    {
+        let text_state = TextState::new();
+        process_content_with_blocks(
+            doc,
+            page_index,
+            ann_resources.or(resources),
+            &bytes,
+            ann_matrix,
+            text_state,
+            page_clip,
+            &mut font_map_cache,
+            &mut decoded_stream_cache,
+            &mut blocks,
+        );
+    }
+    blocks.finish_with_chars()
+}
+
 fn extract_text_blocks_raw(
     doc: &PdfDoc,
     pages: &[Object],
@@ -1280,6 +1333,18 @@ fn extract_text_blocks_raw(
         extract_text_blocks_raw_parallel_from_pages(doc, pages)
     } else {
         extract_text_blocks_raw_serial_from_pages(doc, pages)
+    }
+}
+
+fn extract_text_blocks_with_chars_raw(
+    doc: &PdfDoc,
+    pages: &[Object],
+    parallel_mode: Option<ExtractParallelMode>,
+) -> (Vec<TextBlock>, Vec<Vec<CharBBox>>) {
+    if should_parallel_extract_with_mode(pages.len(), parallel_mode) {
+        extract_text_blocks_with_chars_raw_parallel_from_pages(doc, pages)
+    } else {
+        extract_text_blocks_with_chars_raw_serial_from_pages(doc, pages)
     }
 }
 
@@ -1335,6 +1400,70 @@ fn extract_text_blocks_raw_serial_from_pages(doc: &PdfDoc, pages: &[Object]) -> 
     blocks.finish()
 }
 
+fn extract_text_blocks_with_chars_raw_parallel_from_pages(
+    doc: &PdfDoc,
+    pages: &[Object],
+) -> (Vec<TextBlock>, Vec<Vec<CharBBox>>) {
+    let per_page: Vec<(Vec<TextBlock>, Vec<Vec<CharBBox>>)> = pages
+        .par_iter()
+        .enumerate()
+        .map(|(page_index, page)| extract_text_blocks_with_chars_for_page(doc, page_index, page))
+        .collect();
+    let mut blocks = Vec::new();
+    let mut block_chars = Vec::new();
+    for (page_blocks, page_chars) in per_page {
+        blocks.extend(page_blocks);
+        block_chars.extend(page_chars);
+    }
+    (blocks, block_chars)
+}
+
+fn extract_text_blocks_with_chars_raw_serial_from_pages(
+    doc: &PdfDoc,
+    pages: &[Object],
+) -> (Vec<TextBlock>, Vec<Vec<CharBBox>>) {
+    let mut blocks = BlockAccumulator::new(true);
+    let mut font_map_cache: FontMapCache = HashMap::new();
+    let mut decoded_stream_cache = DecodedStreamCache::default();
+    for (page_index, page) in pages.iter().enumerate() {
+        let page_clip = page_clip_rect(doc, page);
+        let (resources, contents) = page_resources_and_contents(doc, page);
+        let content_bytes = decode_contents(doc, &contents, &mut decoded_stream_cache);
+        let ctm = Matrix::identity();
+        let text_state = TextState::new();
+        process_content_with_blocks(
+            doc,
+            page_index,
+            resources,
+            &content_bytes,
+            ctm,
+            text_state,
+            page_clip,
+            &mut font_map_cache,
+            &mut decoded_stream_cache,
+            &mut blocks,
+        );
+        for (bytes, ann_resources, ann_matrix) in
+            annotation_appearance_streams(doc, page, &mut decoded_stream_cache)
+        {
+            let text_state = TextState::new();
+            process_content_with_blocks(
+                doc,
+                page_index,
+                ann_resources.or(resources),
+                &bytes,
+                ann_matrix,
+                text_state,
+                page_clip,
+                &mut font_map_cache,
+                &mut decoded_stream_cache,
+                &mut blocks,
+            );
+        }
+    }
+    blocks.finish_with_chars()
+}
+
 pub fn extract_text_blocks(doc: &PdfDoc) -> Vec<TextBlock> {
     extract_text_blocks_with_parallel_mode(doc, None)
 }
@@ -1348,6 +1477,19 @@ pub fn extract_text_blocks_with_parallel_mode(
     let raw = extract_text_blocks_raw(doc, &pages, parallel_mode);
     let canonicalized = canonicalize_text_blocks(raw, &layouts);
     dedupe_exact_blocks(canonicalized)
+}
+
+pub fn extract_text_blocks_with_chars_with_parallel_mode(
+    doc: &PdfDoc,
+    parallel_mode: Option<ExtractParallelMode>,
+) -> (Vec<TextBlock>, Vec<Vec<CharBBox>>) {
+    let pages = collect_pages(doc);
+    let layouts = page_layouts_for_pages(doc, &pages);
+    let (raw_blocks, raw_block_chars) =
+        extract_text_blocks_with_chars_raw(doc, &pages, parallel_mode);
+    let (canonicalized_blocks, canonicalized_block_chars) =
+        canonicalize_text_blocks_with_chars(raw_blocks, raw_block_chars, &layouts);
+    dedupe_exact_blocks_with_chars(canonicalized_blocks, canonicalized_block_chars)
 }
 
 pub fn extract_char_bboxes_with_style(doc: &PdfDoc) -> Vec<(CharBBox, TextStyle)> {
@@ -2925,6 +3067,37 @@ fn canonicalize_text_blocks(blocks: Vec<TextBlock>, layouts: &[PageLayout]) -> V
         .collect()
 }
 
+fn canonicalize_text_blocks_with_chars(
+    blocks: Vec<TextBlock>,
+    block_chars: Vec<Vec<CharBBox>>,
+    layouts: &[PageLayout],
+) -> (Vec<TextBlock>, Vec<Vec<CharBBox>>) {
+    if blocks.len() != block_chars.len() {
+        return (canonicalize_text_blocks(blocks, layouts), Vec::new());
+    }
+
+    let mut out_blocks = Vec::with_capacity(blocks.len());
+    let mut out_block_chars = Vec::with_capacity(block_chars.len());
+    for (mut block, mut chars) in blocks.into_iter().zip(block_chars.into_iter()) {
+        let bbox = canonicalize_rect(block.bbox, block.page_index, layouts);
+        if !is_valid_canonical_rect(&bbox) {
+            continue;
+        }
+        block.bbox = bbox;
+        chars.retain_mut(|ch| {
+            let bbox = canonicalize_rect(ch.bbox, ch.page_index, layouts);
+            if !is_valid_canonical_rect(&bbox) {
+                return false;
+            }
+            ch.bbox = bbox;
+            true
+        });
+        out_blocks.push(block);
+        out_block_chars.push(chars);
+    }
+    (out_blocks, out_block_chars)
+}
+
 type RectBits = (u64, u64, u64, u64);
 type CharKey = (usize, char, RectBits);
 type BlockKey = (usize, String, RectBits);
@@ -2986,6 +3159,43 @@ fn dedupe_exact_blocks(blocks: Vec<TextBlock>) -> Vec<TextBlock> {
         }
     }
     out
+}
+
+fn dedupe_exact_blocks_with_chars(
+    blocks: Vec<TextBlock>,
+    block_chars: Vec<Vec<CharBBox>>,
+) -> (Vec<TextBlock>, Vec<Vec<CharBBox>>) {
+    if blocks.len() != block_chars.len() {
+        return (dedupe_exact_blocks(blocks), Vec::new());
+    }
+    if blocks.len() < 2 {
+        return (blocks, block_chars);
+    }
+
+    let mut rect_seen: HashSet<(usize, RectBits)> = HashSet::with_capacity(blocks.len());
+    let mut has_rect_duplicates = false;
+    for block in &blocks {
+        let key = (block.page_index, rect_bits(block.bbox));
+        if !rect_seen.insert(key) {
+            has_rect_duplicates = true;
+            break;
+        }
+    }
+    if !has_rect_duplicates {
+        return (blocks, block_chars);
+    }
+
+    let mut seen: HashSet<BlockKey> = HashSet::new();
+    let mut out_blocks = Vec::with_capacity(blocks.len());
+    let mut out_block_chars = Vec::with_capacity(block_chars.len());
+    for (block, chars) in blocks.into_iter().zip(block_chars.into_iter()) {
+        let key = (block.page_index, block.text.clone(), rect_bits(block.bbox));
+        if seen.insert(key) {
+            out_blocks.push(block);
+            out_block_chars.push(chars);
+        }
+    }
+    (out_blocks, out_block_chars)
 }
 
 fn dedupe_exact_chars_with_style(chars: Vec<(CharBBox, TextStyle)>) -> Vec<(CharBBox, TextStyle)> {
@@ -5747,6 +5957,61 @@ mod tests {
             assert_eq!(
                 parallel, serial,
                 "parallel char extraction drifted for {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn single_pass_block_and_char_extraction_matches_existing_outputs() {
+        let fixture_paths = [
+            "tests/pdfs/fw2.pdf",
+            "tests/pdfs/edge/edge_inline_image_payload_continuation.pdf",
+        ];
+        for path in fixture_paths {
+            let doc = parse_fixture_doc(path);
+            let blocks =
+                extract_text_blocks_with_parallel_mode(&doc, Some(ExtractParallelMode::Off))
+                    .into_iter()
+                    .map(|block| (block.page_index, block.text, block.bbox))
+                    .collect::<Vec<_>>();
+            let chars =
+                extract_char_bboxes_with_parallel_mode(&doc, Some(ExtractParallelMode::Off))
+                    .into_iter()
+                    .filter(|ch| !ch.ch.is_whitespace())
+                    .map(|ch| (ch.page_index, ch.ch, ch.bbox))
+                    .collect::<Vec<_>>();
+
+            let (single_pass_blocks, single_pass_block_chars) =
+                extract_text_blocks_with_chars_with_parallel_mode(
+                    &doc,
+                    Some(ExtractParallelMode::Off),
+                );
+            assert_eq!(
+                single_pass_blocks.len(),
+                single_pass_block_chars.len(),
+                "single-pass block/char alignment drifted for {path}"
+            );
+
+            let single_pass_blocks = single_pass_blocks
+                .into_iter()
+                .map(|block| (block.page_index, block.text, block.bbox))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                single_pass_blocks, blocks,
+                "single-pass blocks drifted for {path}"
+            );
+
+            let flattened = single_pass_block_chars
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>();
+            let single_pass_chars = dedupe_exact_chars(flattened)
+                .into_iter()
+                .map(|ch| (ch.page_index, ch.ch, ch.bbox))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                single_pass_chars, chars,
+                "single-pass chars drifted for {path}"
             );
         }
     }
