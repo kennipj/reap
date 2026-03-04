@@ -37,7 +37,7 @@ print(year[0].text)
 
 ## Advanced use cases
 * `TextBlockIndex.scoped` creates a `TextBlockIndex` scoped to a specific region, with support for merging text blocks within the region into multi-word `TextBlock`s.
-* `TextBlockIndex(..., include_chars=True)` enables `TextBlockIndex.chars`, returning all `TextChar`s for each page.
+* `TextBlock.chars` returns the per-block extracted `TextChar` list.
 
 ## Scope
 * OCR is not in-scope. Reap focuses entirely on extracting visible text present in the PDF.
