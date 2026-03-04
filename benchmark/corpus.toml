@@ -34,6 +34,10 @@ overlap_alt = 0.2
 dataset = "fw2"
 pattern = "Attention:"
 
+[scenarios.split_cached]
+dataset = "fw2"
+pattern = "Attention:"
+
 [scenarios.scoped_merge_rules]
 dataset = "fw2"
 overlap = 1.0

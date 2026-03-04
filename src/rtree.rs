@@ -266,6 +266,12 @@ pub enum RegexSearchError {
 }
 
 #[derive(Debug)]
+pub enum SplitError {
+    InvalidPattern(regex::Error),
+    MissingBlockChars,
+}
+
+#[derive(Debug)]
 struct CompiledRegexCache {
     capacity: usize,
     map: HashMap<String, regex::Regex>,
@@ -621,6 +627,93 @@ impl TextBlockIndex {
         self.regex_indices_cache
             .insert(pattern.to_string(), out.clone());
         Ok(out)
+    }
+
+    pub fn split(&self, pattern: &str) -> Result<Self, SplitError> {
+        let regex = compiled_regex(pattern).map_err(SplitError::InvalidPattern)?;
+        let Some(block_chars) = self.block_chars.as_ref() else {
+            return Err(SplitError::MissingBlockChars);
+        };
+
+        let mut out_blocks: Option<Vec<TextBlock>> = None;
+        let mut out_block_chars: Option<Vec<Vec<CharBBox>>> = None;
+
+        for (index, block) in self.blocks.iter().enumerate() {
+            let chars = block_chars
+                .get(index)
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            let maybe_match = regex
+                .find_iter(&block.text)
+                .find(|mat| mat.start() < mat.end());
+            let Some(mat) = maybe_match else {
+                if let (Some(blocks_out), Some(chars_out)) =
+                    (out_blocks.as_mut(), out_block_chars.as_mut())
+                {
+                    blocks_out.push(block.clone());
+                    chars_out.push(chars.to_vec());
+                }
+                continue;
+            };
+
+            let Some(split_blocks) = split_block_by_match(block, chars, mat.start(), mat.end())
+            else {
+                if let (Some(blocks_out), Some(chars_out)) =
+                    (out_blocks.as_mut(), out_block_chars.as_mut())
+                {
+                    blocks_out.push(block.clone());
+                    chars_out.push(chars.to_vec());
+                }
+                continue;
+            };
+            let changed = split_blocks.len() > 1
+                || split_blocks
+                    .first()
+                    .is_some_and(|(split, _)| split.text != block.text || split.bbox != block.bbox);
+            if !changed {
+                if let (Some(blocks_out), Some(chars_out)) =
+                    (out_blocks.as_mut(), out_block_chars.as_mut())
+                {
+                    blocks_out.push(block.clone());
+                    chars_out.push(chars.to_vec());
+                }
+                continue;
+            }
+
+            if out_blocks.is_none() {
+                let mut blocks_out = Vec::with_capacity(self.blocks.len().saturating_add(2));
+                let mut chars_out = Vec::with_capacity(self.blocks.len().saturating_add(2));
+                for prior in 0..index {
+                    blocks_out.push(self.blocks[prior].clone());
+                    chars_out.push(block_chars[prior].clone());
+                }
+                out_blocks = Some(blocks_out);
+                out_block_chars = Some(chars_out);
+            }
+
+            if let (Some(blocks_out), Some(chars_out)) =
+                (out_blocks.as_mut(), out_block_chars.as_mut())
+            {
+                for (split, split_chars) in split_blocks {
+                    blocks_out.push(split);
+                    chars_out.push(split_chars);
+                }
+            }
+        }
+
+        if let (Some(blocks_out), Some(chars_out)) = (out_blocks, out_block_chars) {
+            return Ok(Self::from_parts(
+                blocks_out,
+                Some(Arc::new(chars_out)),
+                Some(self.page_rects.clone()),
+            ));
+        }
+
+        Ok(Self::from_parts(
+            self.blocks.clone(),
+            Some(Arc::clone(block_chars)),
+            Some(self.page_rects.clone()),
+        ))
     }
 
     pub fn doc_rect(&self) -> Rectangle {
@@ -1467,6 +1560,158 @@ fn text_block_from_blocks(blocks: &[TextBlock], block_indices: &[usize]) -> Opti
     })
 }
 
+fn split_block_by_match(
+    block: &TextBlock,
+    chars: &[CharBBox],
+    match_start: usize,
+    match_end: usize,
+) -> Option<Vec<(TextBlock, Vec<CharBBox>)>> {
+    if match_start >= match_end || match_end > block.text.len() {
+        return None;
+    }
+
+    let (match_start_char, match_end_char) =
+        byte_range_to_char_range(&block.text, match_start, match_end)?;
+    let char_boundaries = map_text_char_boundaries_to_char_offsets(&block.text, chars)?;
+    if match_end_char > char_boundaries.len().saturating_sub(1) {
+        return None;
+    }
+
+    let left_char_end = char_boundaries[match_start_char];
+    let match_char_start = char_boundaries[match_start_char];
+    let match_char_end = char_boundaries[match_end_char];
+    let right_char_start = char_boundaries[match_end_char];
+    let right_char_end = chars.len();
+
+    let mut out: Vec<(TextBlock, Vec<CharBBox>)> = Vec::with_capacity(3);
+    push_split_segment(
+        &mut out,
+        block,
+        &block.text[..match_start],
+        chars,
+        0,
+        left_char_end,
+    );
+    push_split_segment(
+        &mut out,
+        block,
+        &block.text[match_start..match_end],
+        chars,
+        match_char_start,
+        match_char_end,
+    );
+    push_split_segment(
+        &mut out,
+        block,
+        &block.text[match_end..],
+        chars,
+        right_char_start,
+        right_char_end,
+    );
+
+    if out.is_empty() {
+        return None;
+    }
+    Some(out)
+}
+
+fn push_split_segment(
+    out: &mut Vec<(TextBlock, Vec<CharBBox>)>,
+    source: &TextBlock,
+    text: &str,
+    chars: &[CharBBox],
+    char_start: usize,
+    char_end: usize,
+) {
+    if text.is_empty() || char_start >= char_end || char_end > chars.len() {
+        return;
+    }
+    let segment_chars = chars[char_start..char_end].to_vec();
+    let Some(segment_bbox) = bbox_from_chars(&segment_chars) else {
+        return;
+    };
+    out.push((
+        TextBlock {
+            page_index: source.page_index,
+            text: text.to_string(),
+            bbox: segment_bbox,
+        },
+        segment_chars,
+    ));
+}
+
+fn bbox_from_chars(chars: &[CharBBox]) -> Option<Rectangle> {
+    let mut iter = chars.iter();
+    let first = iter.next()?;
+    let mut bbox = first.bbox;
+    for ch in iter {
+        bbox = union_rectangles(bbox, ch.bbox);
+    }
+    Some(bbox)
+}
+
+fn map_text_char_boundaries_to_char_offsets(text: &str, chars: &[CharBBox]) -> Option<Vec<usize>> {
+    let mut boundaries: Vec<usize> = Vec::with_capacity(text.chars().count().saturating_add(1));
+    boundaries.push(0);
+    let mut consumed = 0usize;
+
+    for ch in text.chars() {
+        if ch.is_whitespace() {
+            boundaries.push(consumed);
+            continue;
+        }
+        while consumed < chars.len() && chars[consumed].ch != ch {
+            consumed += 1;
+        }
+        if consumed >= chars.len() {
+            return None;
+        }
+        consumed += 1;
+        boundaries.push(consumed);
+    }
+
+    Some(boundaries)
+}
+
+fn byte_range_to_char_range(text: &str, start: usize, end: usize) -> Option<(usize, usize)> {
+    if start > end || end > text.len() {
+        return None;
+    }
+    if !text.is_char_boundary(start) || !text.is_char_boundary(end) {
+        return None;
+    }
+
+    let mut start_char = None;
+    let mut end_char = None;
+    let mut count = 0usize;
+
+    if start == 0 {
+        start_char = Some(0);
+    }
+    if end == 0 {
+        end_char = Some(0);
+    }
+
+    for (idx, _) in text.char_indices() {
+        if idx == start {
+            start_char = Some(count);
+        }
+        if idx == end {
+            end_char = Some(count);
+        }
+        count += 1;
+    }
+
+    if start == text.len() {
+        start_char = Some(count);
+    }
+    if end == text.len() {
+        end_char = Some(count);
+    }
+
+    Some((start_char?, end_char?))
+}
+
 fn union_rectangles(a: Rectangle, b: Rectangle) -> Rectangle {
     Rectangle {
         top: a.top.min(b.top),
@@ -1479,7 +1724,7 @@ fn union_rectangles(a: Rectangle, b: Rectangle) -> Rectangle {
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_DENSE_INFERRED_PAGE_RECTS, ScopedMergeRules, TextBlockIndex, is_date_token,
+        MAX_DENSE_INFERRED_PAGE_RECTS, ScopedMergeRules, SplitError, TextBlockIndex, is_date_token,
         is_numeric_token,
     };
     use crate::text::{CharBBox, Rectangle, TextBlock};
@@ -1665,6 +1910,232 @@ mod tests {
             .collect::<String>();
         assert_eq!(first_chars, "HI");
         assert_eq!(second_chars, "LW");
+    }
+
+    #[test]
+    fn split_splits_single_block_into_left_match_and_right() {
+        let blocks = vec![make_block(0, "He123llo", 10.0, 10.0, 20.0, 38.0)];
+        let block_chars = vec![vec![
+            make_char(0, 'H', 10.0, 10.0, 20.0, 14.0),
+            make_char(0, 'e', 10.0, 14.0, 20.0, 18.0),
+            make_char(0, '1', 10.0, 18.0, 20.0, 22.0),
+            make_char(0, '2', 10.0, 22.0, 20.0, 26.0),
+            make_char(0, '3', 10.0, 26.0, 20.0, 30.0),
+            make_char(0, 'l', 10.0, 30.0, 20.0, 34.0),
+            make_char(0, 'l', 10.0, 34.0, 20.0, 36.0),
+            make_char(0, 'o', 10.0, 36.0, 20.0, 38.0),
+        ]];
+        let index = TextBlockIndex::new_with_chars(blocks, block_chars);
+        let split = index.split("123").expect("split should succeed");
+        assert_eq!(split.block_len(), 3);
+        assert_eq!(
+            split.block_at(0).map(|block| block.text.as_str()),
+            Some("He")
+        );
+        assert_eq!(
+            split.block_at(1).map(|block| block.text.as_str()),
+            Some("123")
+        );
+        assert_eq!(
+            split.block_at(2).map(|block| block.text.as_str()),
+            Some("llo")
+        );
+        assert_eq!(split.block_at(0).map(|block| block.bbox.left), Some(10.0));
+        assert_eq!(split.block_at(0).map(|block| block.bbox.right), Some(18.0));
+        assert_eq!(split.block_at(1).map(|block| block.bbox.left), Some(18.0));
+        assert_eq!(split.block_at(1).map(|block| block.bbox.right), Some(30.0));
+        assert_eq!(split.block_at(2).map(|block| block.bbox.left), Some(30.0));
+        assert_eq!(split.block_at(2).map(|block| block.bbox.right), Some(38.0));
+        assert_eq!(
+            split
+                .block_chars_at(0)
+                .expect("left chars should exist")
+                .iter()
+                .map(|ch| ch.ch)
+                .collect::<String>(),
+            "He"
+        );
+        assert_eq!(
+            split
+                .block_chars_at(1)
+                .expect("match chars should exist")
+                .iter()
+                .map(|ch| ch.ch)
+                .collect::<String>(),
+            "123"
+        );
+        assert_eq!(
+            split
+                .block_chars_at(2)
+                .expect("right chars should exist")
+                .iter()
+                .map(|ch| ch.ch)
+                .collect::<String>(),
+            "llo"
+        );
+    }
+
+    #[test]
+    fn split_uses_first_non_empty_match_per_block() {
+        let blocks = vec![make_block(0, "a1b1c", 10.0, 10.0, 20.0, 35.0)];
+        let block_chars = vec![vec![
+            make_char(0, 'a', 10.0, 10.0, 20.0, 15.0),
+            make_char(0, '1', 10.0, 15.0, 20.0, 20.0),
+            make_char(0, 'b', 10.0, 20.0, 20.0, 25.0),
+            make_char(0, '1', 10.0, 25.0, 20.0, 30.0),
+            make_char(0, 'c', 10.0, 30.0, 20.0, 35.0),
+        ]];
+        let index = TextBlockIndex::new_with_chars(blocks, block_chars);
+        let split = index.split("1").expect("split should succeed");
+        assert_eq!(split.block_len(), 3);
+        assert_eq!(
+            split.block_at(0).map(|block| block.text.as_str()),
+            Some("a")
+        );
+        assert_eq!(
+            split.block_at(1).map(|block| block.text.as_str()),
+            Some("1")
+        );
+        assert_eq!(
+            split.block_at(2).map(|block| block.text.as_str()),
+            Some("b1c")
+        );
+    }
+
+    #[test]
+    fn split_preserves_non_matching_blocks_and_order() {
+        let blocks = vec![
+            make_block(0, "alpha", 10.0, 10.0, 20.0, 20.0),
+            make_block(0, "He123llo", 10.0, 30.0, 20.0, 58.0),
+            make_block(1, "omega", 40.0, 10.0, 50.0, 25.0),
+        ];
+        let block_chars = vec![
+            vec![
+                make_char(0, 'a', 10.0, 10.0, 20.0, 12.0),
+                make_char(0, 'l', 10.0, 12.0, 20.0, 14.0),
+                make_char(0, 'p', 10.0, 14.0, 20.0, 16.0),
+                make_char(0, 'h', 10.0, 16.0, 20.0, 18.0),
+                make_char(0, 'a', 10.0, 18.0, 20.0, 20.0),
+            ],
+            vec![
+                make_char(0, 'H', 10.0, 30.0, 20.0, 34.0),
+                make_char(0, 'e', 10.0, 34.0, 20.0, 38.0),
+                make_char(0, '1', 10.0, 38.0, 20.0, 42.0),
+                make_char(0, '2', 10.0, 42.0, 20.0, 46.0),
+                make_char(0, '3', 10.0, 46.0, 20.0, 50.0),
+                make_char(0, 'l', 10.0, 50.0, 20.0, 53.0),
+                make_char(0, 'l', 10.0, 53.0, 20.0, 55.0),
+                make_char(0, 'o', 10.0, 55.0, 20.0, 58.0),
+            ],
+            vec![
+                make_char(1, 'o', 40.0, 10.0, 50.0, 13.0),
+                make_char(1, 'm', 40.0, 13.0, 50.0, 16.0),
+                make_char(1, 'e', 40.0, 16.0, 50.0, 19.0),
+                make_char(1, 'g', 40.0, 19.0, 50.0, 22.0),
+                make_char(1, 'a', 40.0, 22.0, 50.0, 25.0),
+            ],
+        ];
+        let index = TextBlockIndex::new_with_chars(blocks, block_chars);
+        let split = index.split("123").expect("split should succeed");
+        let texts = (0..split.block_len())
+            .filter_map(|i| split.block_at(i).map(|block| block.text.clone()))
+            .collect::<Vec<String>>();
+        assert_eq!(texts, vec!["alpha", "He", "123", "llo", "omega"]);
+        assert_eq!(split.block_at(0).map(|block| block.page_index), Some(0));
+        assert_eq!(split.block_at(4).map(|block| block.page_index), Some(1));
+    }
+
+    #[test]
+    fn split_handles_synthetic_spaces_from_scoped_merges() {
+        let blocks = vec![
+            make_block(0, "AB", 10.0, 10.0, 20.0, 20.0),
+            make_block(0, "CD", 10.0, 21.0, 20.0, 30.0),
+        ];
+        let block_chars = vec![
+            vec![
+                make_char(0, 'A', 10.0, 10.0, 20.0, 14.0),
+                make_char(0, 'B', 10.0, 14.0, 20.0, 20.0),
+            ],
+            vec![
+                make_char(0, 'C', 10.0, 21.0, 20.0, 25.0),
+                make_char(0, 'D', 10.0, 25.0, 20.0, 30.0),
+            ],
+        ];
+        let index = TextBlockIndex::new_with_chars(blocks, block_chars);
+        let scoped = index.scoped(
+            Rectangle {
+                top: 0.0,
+                left: 0.0,
+                bottom: 100.0,
+                right: 100.0,
+            },
+            0.0,
+            5.0,
+            false,
+            ScopedMergeRules::default(),
+        );
+        assert_eq!(
+            scoped.block_at(0).map(|block| block.text.as_str()),
+            Some("AB CD")
+        );
+
+        let split = scoped.split("CD").expect("split should succeed");
+        assert_eq!(split.block_len(), 2);
+        assert_eq!(
+            split.block_at(0).map(|block| block.text.as_str()),
+            Some("AB ")
+        );
+        assert_eq!(
+            split.block_at(1).map(|block| block.text.as_str()),
+            Some("CD")
+        );
+        assert_eq!(
+            split
+                .block_chars_at(0)
+                .expect("left chars should exist")
+                .iter()
+                .map(|ch| ch.ch)
+                .collect::<String>(),
+            "AB"
+        );
+        assert_eq!(
+            split
+                .block_chars_at(1)
+                .expect("match chars should exist")
+                .iter()
+                .map(|ch| ch.ch)
+                .collect::<String>(),
+            "CD"
+        );
+    }
+
+    #[test]
+    fn split_returns_error_when_block_chars_are_missing() {
+        let index = TextBlockIndex::new(vec![make_block(0, "He123llo", 10.0, 10.0, 20.0, 38.0)]);
+        let err = index
+            .split("123")
+            .expect_err("split should fail without block chars");
+        assert!(matches!(err, SplitError::MissingBlockChars));
+    }
+
+    #[test]
+    fn split_invalid_pattern_returns_error() {
+        let blocks = vec![make_block(0, "He123llo", 10.0, 10.0, 20.0, 38.0)];
+        let block_chars = vec![vec![
+            make_char(0, 'H', 10.0, 10.0, 20.0, 14.0),
+            make_char(0, 'e', 10.0, 14.0, 20.0, 18.0),
+            make_char(0, '1', 10.0, 18.0, 20.0, 22.0),
+            make_char(0, '2', 10.0, 22.0, 20.0, 26.0),
+            make_char(0, '3', 10.0, 26.0, 20.0, 30.0),
+            make_char(0, 'l', 10.0, 30.0, 20.0, 34.0),
+            make_char(0, 'l', 10.0, 34.0, 20.0, 36.0),
+            make_char(0, 'o', 10.0, 36.0, 20.0, 38.0),
+        ]];
+        let index = TextBlockIndex::new_with_chars(blocks, block_chars);
+        let err = index
+            .split("(")
+            .expect_err("pattern should be reported as invalid");
+        assert!(matches!(err, SplitError::InvalidPattern(_)));
     }
 
     #[test]
