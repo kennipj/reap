@@ -1479,17 +1479,35 @@ pub fn extract_text_blocks_with_parallel_mode(
     dedupe_exact_blocks(canonicalized)
 }
 
-pub fn extract_text_blocks_with_chars_with_parallel_mode(
+pub fn extract_page_rects(doc: &PdfDoc) -> Vec<Rectangle> {
+    let pages = collect_pages(doc);
+    let layouts = page_layouts_for_pages(doc, &pages);
+    page_rects_from_layouts(&layouts)
+}
+
+pub fn extract_text_blocks_with_chars_and_page_rects_with_parallel_mode(
     doc: &PdfDoc,
     parallel_mode: Option<ExtractParallelMode>,
-) -> (Vec<TextBlock>, Vec<Vec<CharBBox>>) {
+) -> (Vec<TextBlock>, Vec<Vec<CharBBox>>, Vec<Rectangle>) {
     let pages = collect_pages(doc);
     let layouts = page_layouts_for_pages(doc, &pages);
     let (raw_blocks, raw_block_chars) =
         extract_text_blocks_with_chars_raw(doc, &pages, parallel_mode);
     let (canonicalized_blocks, canonicalized_block_chars) =
         canonicalize_text_blocks_with_chars(raw_blocks, raw_block_chars, &layouts);
-    dedupe_exact_blocks_with_chars(canonicalized_blocks, canonicalized_block_chars)
+    let (blocks, block_chars) =
+        dedupe_exact_blocks_with_chars(canonicalized_blocks, canonicalized_block_chars);
+    let page_rects = page_rects_from_layouts(&layouts);
+    (blocks, block_chars, page_rects)
+}
+
+pub fn extract_text_blocks_with_chars_with_parallel_mode(
+    doc: &PdfDoc,
+    parallel_mode: Option<ExtractParallelMode>,
+) -> (Vec<TextBlock>, Vec<Vec<CharBBox>>) {
+    let (blocks, block_chars, _) =
+        extract_text_blocks_with_chars_and_page_rects_with_parallel_mode(doc, parallel_mode);
+    (blocks, block_chars)
 }
 
 pub fn extract_char_bboxes_with_style(doc: &PdfDoc) -> Vec<(CharBBox, TextStyle)> {
@@ -1543,6 +1561,18 @@ fn extract_char_bboxes_with_style_for_page(
         );
     }
     out
+}
+
+fn page_rects_from_layouts(layouts: &[PageLayout]) -> Vec<Rectangle> {
+    layouts
+        .iter()
+        .map(|layout| Rectangle {
+            top: layout.y_offset,
+            left: 0.0,
+            bottom: layout.y_offset + layout.rotated_height,
+            right: layout.rotated_width,
+        })
+        .collect()
 }
 
 fn extract_char_bboxes_with_style_raw_from_pages(

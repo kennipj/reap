@@ -11,7 +11,7 @@ use crate::parser::{ParseError, Parser};
 use crate::rtree::{RegexSearchError, ScopedMergeRules, TextBlockIndex as RsTextBlockIndex};
 use crate::text::{
     CharBBox, ExpandDirection, ExpandError, ExtractParallelMode, Rectangle as RsRectangle,
-    extract_text_blocks_with_chars_with_parallel_mode,
+    extract_text_blocks_with_chars_and_page_rects_with_parallel_mode,
 };
 use crate::tokenizer::Lexer;
 
@@ -509,6 +509,21 @@ impl TextBlockIndex {
             right: rect.right,
         }
     }
+
+    #[getter]
+    fn page_rects(&self) -> Vec<Rectangle> {
+        let inner = self.inner.borrow();
+        inner
+            .page_rects_slice()
+            .iter()
+            .map(|rect| Rectangle {
+                top: rect.top,
+                left: rect.left,
+                bottom: rect.bottom,
+                right: rect.right,
+            })
+            .collect()
+    }
 }
 
 impl TextBlockIndex {
@@ -521,11 +536,18 @@ impl TextBlockIndex {
         let doc = Parser::new(Lexer::new(bytes))
             .parse_with_password(password)
             .map_err(parse_error_to_py)?;
-        let (blocks, block_chars) =
-            extract_text_blocks_with_chars_with_parallel_mode(&doc, Some(parallel_mode));
+        let (blocks, block_chars, page_rects) =
+            extract_text_blocks_with_chars_and_page_rects_with_parallel_mode(
+                &doc,
+                Some(parallel_mode),
+            );
         let py_blocks = (0..blocks.len()).map(|_| None).collect();
         Ok(Self {
-            inner: RefCell::new(RsTextBlockIndex::new_with_chars(blocks, block_chars)),
+            inner: RefCell::new(RsTextBlockIndex::new_with_chars_and_page_rects(
+                blocks,
+                block_chars,
+                page_rects,
+            )),
             py_blocks: RefCell::new(py_blocks),
             regex_py_cache: RefCell::new(HashMap::new()),
         })
@@ -540,11 +562,18 @@ impl TextBlockIndex {
         let doc = Parser::new(lexer)
             .parse_with_password(password)
             .map_err(parse_error_to_py)?;
-        let (blocks, block_chars) =
-            extract_text_blocks_with_chars_with_parallel_mode(&doc, Some(parallel_mode));
+        let (blocks, block_chars, page_rects) =
+            extract_text_blocks_with_chars_and_page_rects_with_parallel_mode(
+                &doc,
+                Some(parallel_mode),
+            );
         let py_blocks = (0..blocks.len()).map(|_| None).collect();
         Ok(Self {
-            inner: RefCell::new(RsTextBlockIndex::new_with_chars(blocks, block_chars)),
+            inner: RefCell::new(RsTextBlockIndex::new_with_chars_and_page_rects(
+                blocks,
+                block_chars,
+                page_rects,
+            )),
             py_blocks: RefCell::new(py_blocks),
             regex_py_cache: RefCell::new(HashMap::new()),
         })

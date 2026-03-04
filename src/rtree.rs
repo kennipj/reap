@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -250,6 +251,7 @@ pub struct TextBlockIndex {
     regex_indices_cache: RegexIndicesLruCache,
     regex_index: OnceLock<RegexSearchIndex>,
     doc_rect: Rectangle,
+    page_rects: Vec<Rectangle>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -396,10 +398,11 @@ struct RegexSearchIndex {
 
 const REGEX_LINE_VERTICAL_OVERLAP_THRESHOLD: f64 = 0.8;
 const REGEX_LINE_HEIGHT_RATIO_LIMIT: f64 = 1.5;
+const MAX_DENSE_INFERRED_PAGE_RECTS: usize = 1_000_000;
 
 impl TextBlockIndex {
     pub fn new(blocks: Vec<TextBlock>) -> Self {
-        Self::from_parts(blocks, None)
+        Self::from_parts(blocks, None, None)
     }
 
     pub fn new_with_chars(blocks: Vec<TextBlock>, block_chars: Vec<Vec<CharBBox>>) -> Self {
@@ -408,10 +411,27 @@ impl TextBlockIndex {
             block_chars.len(),
             "block_chars must align one-to-one with blocks"
         );
-        Self::from_parts(blocks, Some(Arc::new(block_chars)))
+        Self::from_parts(blocks, Some(Arc::new(block_chars)), None)
     }
 
-    fn from_parts(blocks: Vec<TextBlock>, block_chars: Option<Arc<Vec<Vec<CharBBox>>>>) -> Self {
+    pub fn new_with_chars_and_page_rects(
+        blocks: Vec<TextBlock>,
+        block_chars: Vec<Vec<CharBBox>>,
+        page_rects: Vec<Rectangle>,
+    ) -> Self {
+        assert_eq!(
+            blocks.len(),
+            block_chars.len(),
+            "block_chars must align one-to-one with blocks"
+        );
+        Self::from_parts(blocks, Some(Arc::new(block_chars)), Some(page_rects))
+    }
+
+    fn from_parts(
+        blocks: Vec<TextBlock>,
+        block_chars: Option<Arc<Vec<Vec<CharBBox>>>>,
+        page_rects: Option<Vec<Rectangle>>,
+    ) -> Self {
         let rects: Vec<RectF> = blocks
             .iter()
             .map(|b| RectF {
@@ -421,7 +441,10 @@ impl TextBlockIndex {
                 max_y: b.bbox.bottom,
             })
             .collect();
-        let doc_rect = doc_rect_from_rects(&rects);
+        let page_rects = page_rects
+            .map(|rects| rects.into_iter().map(normalize_rectangle).collect())
+            .unwrap_or_else(|| infer_page_rects_from_blocks(&blocks));
+        let doc_rect = doc_rect_from_page_rects(&page_rects);
         let rtree = RTree::build(&rects, 16);
         Self {
             blocks,
@@ -433,6 +456,7 @@ impl TextBlockIndex {
             regex_indices_cache: RegexIndicesLruCache::new(128),
             regex_index: OnceLock::new(),
             doc_rect,
+            page_rects,
         }
     }
 
@@ -495,10 +519,11 @@ impl TextBlockIndex {
                 block_chars.push(scoped.chars);
             }
         }
+        let page_rects = Some(self.page_rects.clone());
         if keep_chars {
-            Self::from_parts(blocks, Some(Arc::new(block_chars)))
+            Self::from_parts(blocks, Some(Arc::new(block_chars)), page_rects)
         } else {
-            Self::from_parts(blocks, None)
+            Self::from_parts(blocks, None, page_rects)
         }
     }
 
@@ -602,6 +627,14 @@ impl TextBlockIndex {
         self.doc_rect
     }
 
+    pub fn page_rects(&self) -> Vec<Rectangle> {
+        self.page_rects.clone()
+    }
+
+    pub fn page_rects_slice(&self) -> &[Rectangle] {
+        &self.page_rects
+    }
+
     fn matching_block_indices(&self, rect: Rectangle, overlap: f64) -> Vec<usize> {
         let overlap = overlap.clamp(0.0, 1.0);
         let query = RectF::from_ltrb(rect.left, rect.top, rect.right, rect.bottom);
@@ -614,30 +647,87 @@ impl TextBlockIndex {
     }
 }
 
-fn doc_rect_from_rects(rects: &[RectF]) -> Rectangle {
-    if rects.is_empty() {
+fn doc_rect_from_page_rects(page_rects: &[Rectangle]) -> Rectangle {
+    let mut iter = page_rects
+        .iter()
+        .copied()
+        .map(normalize_rectangle)
+        .filter(|r| {
+            r.left.is_finite()
+                && r.top.is_finite()
+                && r.right.is_finite()
+                && r.bottom.is_finite()
+                && r.left < r.right
+                && r.top < r.bottom
+        });
+    let Some(first) = iter.next() else {
         return Rectangle {
             top: 0.0,
             left: 0.0,
             bottom: 0.0,
             right: 0.0,
         };
-    }
-    let mut min_x = rects[0].min_x;
-    let mut min_y = rects[0].min_y;
-    let mut max_x = rects[0].max_x;
-    let mut max_y = rects[0].max_y;
-    for r in rects.iter().skip(1) {
-        min_x = min_x.min(r.min_x);
-        min_y = min_y.min(r.min_y);
-        max_x = max_x.max(r.max_x);
-        max_y = max_y.max(r.max_y);
+    };
+    let mut min_x = first.left;
+    let mut min_y = first.top;
+    let mut max_x = first.right;
+    let mut max_y = first.bottom;
+    for r in iter {
+        min_x = min_x.min(r.left);
+        min_y = min_y.min(r.top);
+        max_x = max_x.max(r.right);
+        max_y = max_y.max(r.bottom);
     }
     Rectangle {
         top: min_y,
         left: min_x,
         bottom: max_y,
         right: max_x,
+    }
+}
+
+fn infer_page_rects_from_blocks(blocks: &[TextBlock]) -> Vec<Rectangle> {
+    if blocks.is_empty() {
+        return Vec::new();
+    }
+    let mut max_page_index = 0usize;
+    let mut per_page: BTreeMap<usize, Rectangle> = BTreeMap::new();
+    for block in blocks {
+        let rect = normalize_rectangle(block.bbox);
+        max_page_index = max_page_index.max(block.page_index);
+        per_page
+            .entry(block.page_index)
+            .and_modify(|existing| *existing = union_rectangles(*existing, rect))
+            .or_insert(rect);
+    }
+    let Some(dense_len) = max_page_index.checked_add(1) else {
+        return per_page.into_values().collect();
+    };
+    if dense_len > MAX_DENSE_INFERRED_PAGE_RECTS {
+        return per_page.into_values().collect();
+    }
+    let mut page_rects = vec![empty_rectangle(); dense_len];
+    for (page_index, rect) in per_page {
+        page_rects[page_index] = rect;
+    }
+    page_rects
+}
+
+fn empty_rectangle() -> Rectangle {
+    Rectangle {
+        top: 0.0,
+        left: 0.0,
+        bottom: 0.0,
+        right: 0.0,
+    }
+}
+
+fn normalize_rectangle(rect: Rectangle) -> Rectangle {
+    Rectangle {
+        top: rect.top.min(rect.bottom),
+        left: rect.left.min(rect.right),
+        bottom: rect.top.max(rect.bottom),
+        right: rect.left.max(rect.right),
     }
 }
 
@@ -1388,7 +1478,10 @@ fn union_rectangles(a: Rectangle, b: Rectangle) -> Rectangle {
 
 #[cfg(test)]
 mod tests {
-    use super::{ScopedMergeRules, TextBlockIndex, is_date_token, is_numeric_token};
+    use super::{
+        MAX_DENSE_INFERRED_PAGE_RECTS, ScopedMergeRules, TextBlockIndex, is_date_token,
+        is_numeric_token,
+    };
     use crate::text::{CharBBox, Rectangle, TextBlock};
 
     #[test]
@@ -1572,5 +1665,111 @@ mod tests {
             .collect::<String>();
         assert_eq!(first_chars, "HI");
         assert_eq!(second_chars, "LW");
+    }
+
+    #[test]
+    fn page_rects_are_inferred_per_page_index_when_not_provided() {
+        let blocks = vec![
+            make_block(0, "P0-A", 10.0, 10.0, 20.0, 25.0),
+            make_block(0, "P0-B", 18.0, 30.0, 28.0, 40.0),
+            make_block(2, "P2-A", 220.0, 5.0, 230.0, 20.0),
+        ];
+        let index = TextBlockIndex::new(blocks);
+        assert_eq!(
+            index.page_rects(),
+            vec![
+                Rectangle {
+                    top: 10.0,
+                    left: 10.0,
+                    bottom: 28.0,
+                    right: 40.0,
+                },
+                Rectangle {
+                    top: 0.0,
+                    left: 0.0,
+                    bottom: 0.0,
+                    right: 0.0,
+                },
+                Rectangle {
+                    top: 220.0,
+                    left: 5.0,
+                    bottom: 230.0,
+                    right: 20.0,
+                },
+            ]
+        );
+        assert_eq!(
+            index.doc_rect(),
+            Rectangle {
+                top: 10.0,
+                left: 5.0,
+                bottom: 230.0,
+                right: 40.0,
+            }
+        );
+    }
+
+    #[test]
+    fn page_rects_preserve_explicit_values() {
+        let blocks = vec![
+            make_block(0, "P0", 10.0, 10.0, 20.0, 20.0),
+            make_block(1, "P1", 110.0, 10.0, 120.0, 20.0),
+        ];
+        let block_chars = vec![
+            vec![make_char(0, 'A', 10.0, 10.0, 20.0, 20.0)],
+            vec![make_char(1, 'B', 110.0, 10.0, 120.0, 20.0)],
+        ];
+        let page_rects = vec![
+            Rectangle {
+                top: 0.0,
+                left: 0.0,
+                bottom: 100.0,
+                right: 80.0,
+            },
+            Rectangle {
+                top: 100.0,
+                left: 0.0,
+                bottom: 210.0,
+                right: 80.0,
+            },
+        ];
+        let index = TextBlockIndex::new_with_chars_and_page_rects(blocks, block_chars, page_rects);
+        assert_eq!(
+            index.doc_rect(),
+            Rectangle {
+                top: 0.0,
+                left: 0.0,
+                bottom: 210.0,
+                right: 80.0,
+            }
+        );
+        assert_eq!(index.page_rects()[1].top, 100.0);
+        assert_eq!(index.page_rects()[1].bottom, 210.0);
+    }
+
+    #[test]
+    fn page_rect_inference_uses_compact_fallback_for_huge_sparse_indices() {
+        let blocks = vec![
+            make_block(0, "P0", 10.0, 10.0, 20.0, 20.0),
+            make_block(
+                MAX_DENSE_INFERRED_PAGE_RECTS + 10,
+                "PX",
+                210.0,
+                10.0,
+                220.0,
+                20.0,
+            ),
+        ];
+        let index = TextBlockIndex::new(blocks);
+        assert_eq!(index.page_rects().len(), 2);
+        assert_eq!(
+            index.doc_rect(),
+            Rectangle {
+                top: 10.0,
+                left: 10.0,
+                bottom: 220.0,
+                right: 20.0,
+            }
+        );
     }
 }
