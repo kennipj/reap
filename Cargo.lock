@@ -923,6 +923,7 @@ dependencies = [
  "memchr",
  "pprof",
  "pyo3",
+ "rayon",
  "rc4",
  "regex",
  "serde",

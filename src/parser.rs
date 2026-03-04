@@ -3,7 +3,7 @@ use std::fmt;
 
 use crate::model::Object;
 use crate::pdf_crypto::{CryptMethod, PdfCryptoError, PdfEncryption};
-use crate::tokenizer::{Lexer, Token};
+use crate::tokenizer::{Keyword, Lexer, Token};
 
 #[derive(Debug)]
 pub enum ParseError {
@@ -167,7 +167,7 @@ impl<'a> Parser<'a> {
                         _ => None,
                     };
                     let has_obj_keyword =
-                        matches!(self.peek_token_n_ref(2), Some(Token::Keyword(kw)) if kw == "obj");
+                        matches!(self.peek_token_n_ref(2), Some(Token::Keyword(Keyword::Obj)));
                     if let (Some(gen_num), true) = (gen_num, has_obj_keyword) {
                         let _ = self.next_token();
                         let _ = self.next_token();
@@ -183,7 +183,7 @@ impl<'a> Parser<'a> {
                         }
                     }
                 }
-                Token::Keyword(ref kw) if kw == "trailer" => {
+                Token::Keyword(Keyword::Trailer) => {
                     if let Some(obj) = self.parse_object(&objects) {
                         trailer = Some(obj);
                     }
@@ -199,7 +199,7 @@ impl<'a> Parser<'a> {
         let obj = self.parse_object(objects)?;
         loop {
             let (has_token, at_endobj) = match self.peek_token_ref() {
-                Some(Token::Keyword(kw)) if kw == "endobj" => (true, true),
+                Some(Token::Keyword(Keyword::EndObj)) => (true, true),
                 Some(_) => (true, false),
                 None => (false, false),
             };
@@ -239,7 +239,7 @@ impl<'a> Parser<'a> {
             _ => None,
         };
         if let Some(second) = second {
-            let is_ref = matches!(self.peek_token_n_ref(2), Some(Token::Keyword(kw)) if kw == "R");
+            let is_ref = matches!(self.peek_token_n_ref(2), Some(Token::Keyword(Keyword::Ref)));
             if is_ref {
                 let _ = self.next_token();
                 let _ = self.next_token();
@@ -295,7 +295,7 @@ impl<'a> Parser<'a> {
         }
 
         let has_stream_keyword =
-            matches!(self.peek_token_ref(), Some(Token::Keyword(kw)) if kw == "stream");
+            matches!(self.peek_token_ref(), Some(Token::Keyword(Keyword::Stream)));
         match has_stream_keyword {
             true => {
                 let _ = self.next_token();
@@ -310,13 +310,11 @@ impl<'a> Parser<'a> {
                 if length.is_some() {
                     let has_endstream_keyword = matches!(
                         self.peek_token_ref(),
-                        Some(Token::Keyword(kw)) if kw == "endstream"
+                        Some(Token::Keyword(Keyword::EndStream))
                     );
                     if !has_endstream_keyword {
-                        let at_endobj_keyword = matches!(
-                            self.peek_token_ref(),
-                            Some(Token::Keyword(kw)) if kw == "endobj"
-                        );
+                        let at_endobj_keyword =
+                            matches!(self.peek_token_ref(), Some(Token::Keyword(Keyword::EndObj)));
                         let near_endstream = self.find_nearby_keyword_offset(b"endstream", 256);
                         let near_endobj = self.find_nearby_keyword_offset(b"endobj", 256);
                         let should_rescan = match (near_endstream, near_endobj) {
@@ -334,7 +332,7 @@ impl<'a> Parser<'a> {
 
                 let has_endstream_keyword = matches!(
                     self.peek_token_ref(),
-                    Some(Token::Keyword(kw)) if kw == "endstream"
+                    Some(Token::Keyword(Keyword::EndStream))
                 );
                 if has_endstream_keyword {
                     let _ = self.next_token();
@@ -720,7 +718,7 @@ fn parse_positive_integer_indirect_object_at(
         _ => return None,
     }
     match lexer.next_token()? {
-        Token::Keyword(ref kw) if kw == "obj" => {}
+        Token::Keyword(Keyword::Obj) => {}
         _ => return None,
     }
     let value = match lexer.next_token()? {
@@ -728,7 +726,7 @@ fn parse_positive_integer_indirect_object_at(
         _ => return None,
     };
     match lexer.next_token()? {
-        Token::Keyword(ref kw) if kw == "endobj" => Some(value),
+        Token::Keyword(Keyword::EndObj) => Some(value),
         _ => None,
     }
 }

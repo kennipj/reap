@@ -1,10 +1,12 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{OnceLock, RwLock};
+
+use rayon::prelude::*;
 
 use crate::model::Object;
 use crate::parser::PdfDoc;
-use crate::tokenizer::{Lexer, Token};
+use crate::tokenizer::{Keyword, Lexer, Token};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Point {
@@ -167,6 +169,14 @@ impl Rectangle {
         (self.right - self.left).max(0.0) * (self.bottom - self.top).max(0.0)
     }
 
+    fn width(&self) -> f64 {
+        (self.right - self.left).max(0.0)
+    }
+
+    fn height(&self) -> f64 {
+        (self.bottom - self.top).max(0.0)
+    }
+
     fn pick_smallest_rect(rects: &[Rectangle]) -> Rectangle {
         let mut best = rects[0];
         for rect in &rects[1..] {
@@ -178,86 +188,141 @@ impl Rectangle {
         best
     }
 
+    fn pick_larger_rect(a: Rectangle, b: Rectangle) -> Rectangle {
+        let area_cmp = a.area().total_cmp(&b.area());
+        if area_cmp.is_gt() {
+            return a;
+        }
+        if area_cmp.is_lt() {
+            return b;
+        }
+
+        let width_cmp = a.width().total_cmp(&b.width());
+        if width_cmp.is_gt() {
+            return a;
+        }
+        if width_cmp.is_lt() {
+            return b;
+        }
+
+        let height_cmp = a.height().total_cmp(&b.height());
+        if height_cmp.is_gt() {
+            return a;
+        }
+        if height_cmp.is_lt() {
+            return b;
+        }
+
+        if a.state_key() <= b.state_key() { a } else { b }
+    }
+
+    fn has_mixed_axes(directions: &[ExpandDirection]) -> bool {
+        let has_vertical = directions
+            .iter()
+            .any(|d| matches!(d, ExpandDirection::Up | ExpandDirection::Down));
+        let has_horizontal = directions
+            .iter()
+            .any(|d| matches!(d, ExpandDirection::Left | ExpandDirection::Right));
+        has_vertical && has_horizontal
+    }
+
     fn expand_next_state(
         current: Rectangle,
         base: Rectangle,
         blockers: &[Rectangle],
         directions: &[ExpandDirection],
         max_bounds: Rectangle,
+        axis_order: AxisPassOrder,
     ) -> Rectangle {
         let mut next = current;
 
-        for direction in [ExpandDirection::Up, ExpandDirection::Down] {
-            if !directions.contains(&direction) {
-                continue;
-            }
-            match direction {
-                ExpandDirection::Up => {
-                    let candidate = blockers
-                        .iter()
-                        .filter(|blocker| {
-                            blocker.horizontal_overlap_with(&next) && blocker.bottom <= base.top
-                        })
-                        .map(|blocker| blocker.bottom)
-                        .max_by(|a, b| a.total_cmp(b))
-                        .unwrap_or(max_bounds.top);
-                    next.top = candidate.min(base.top).max(max_bounds.top);
+        let apply_vertical = |next: &mut Rectangle| {
+            for direction in [ExpandDirection::Up, ExpandDirection::Down] {
+                if !directions.contains(&direction) {
+                    continue;
                 }
-                ExpandDirection::Down => {
-                    let candidate = blockers
-                        .iter()
-                        .filter(|blocker| {
-                            blocker.horizontal_overlap_with(&next) && blocker.top >= base.bottom
-                        })
-                        .map(|blocker| blocker.top)
-                        .min_by(|a, b| a.total_cmp(b))
-                        .unwrap_or(max_bounds.bottom);
-                    next.bottom = candidate.max(base.bottom).min(max_bounds.bottom);
+                match direction {
+                    ExpandDirection::Up => {
+                        let candidate = blockers
+                            .iter()
+                            .filter(|blocker| {
+                                blocker.horizontal_overlap_with(next) && blocker.bottom <= base.top
+                            })
+                            .map(|blocker| blocker.bottom)
+                            .max_by(|a, b| a.total_cmp(b))
+                            .unwrap_or(max_bounds.top);
+                        next.top = candidate.min(base.top).max(max_bounds.top);
+                    }
+                    ExpandDirection::Down => {
+                        let candidate = blockers
+                            .iter()
+                            .filter(|blocker| {
+                                blocker.horizontal_overlap_with(next) && blocker.top >= base.bottom
+                            })
+                            .map(|blocker| blocker.top)
+                            .min_by(|a, b| a.total_cmp(b))
+                            .unwrap_or(max_bounds.bottom);
+                        next.bottom = candidate.max(base.bottom).min(max_bounds.bottom);
+                    }
+                    _ => {}
                 }
-                _ => {}
             }
-        }
+        };
 
-        for direction in [ExpandDirection::Left, ExpandDirection::Right] {
-            if !directions.contains(&direction) {
-                continue;
+        let apply_horizontal = |next: &mut Rectangle| {
+            for direction in [ExpandDirection::Left, ExpandDirection::Right] {
+                if !directions.contains(&direction) {
+                    continue;
+                }
+                match direction {
+                    ExpandDirection::Left => {
+                        let candidate = blockers
+                            .iter()
+                            .filter(|blocker| {
+                                blocker.vertical_overlap_with(next) && blocker.right <= base.left
+                            })
+                            .map(|blocker| blocker.right)
+                            .max_by(|a, b| a.total_cmp(b))
+                            .unwrap_or(max_bounds.left);
+                        next.left = candidate.min(base.left).max(max_bounds.left);
+                    }
+                    ExpandDirection::Right => {
+                        let candidate = blockers
+                            .iter()
+                            .filter(|blocker| {
+                                blocker.vertical_overlap_with(next) && blocker.left >= base.right
+                            })
+                            .map(|blocker| blocker.left)
+                            .min_by(|a, b| a.total_cmp(b))
+                            .unwrap_or(max_bounds.right);
+                        next.right = candidate.max(base.right).min(max_bounds.right);
+                    }
+                    _ => {}
+                }
             }
-            match direction {
-                ExpandDirection::Left => {
-                    let candidate = blockers
-                        .iter()
-                        .filter(|blocker| {
-                            blocker.vertical_overlap_with(&next) && blocker.right <= base.left
-                        })
-                        .map(|blocker| blocker.right)
-                        .max_by(|a, b| a.total_cmp(b))
-                        .unwrap_or(max_bounds.left);
-                    next.left = candidate.min(base.left).max(max_bounds.left);
-                }
-                ExpandDirection::Right => {
-                    let candidate = blockers
-                        .iter()
-                        .filter(|blocker| {
-                            blocker.vertical_overlap_with(&next) && blocker.left >= base.right
-                        })
-                        .map(|blocker| blocker.left)
-                        .min_by(|a, b| a.total_cmp(b))
-                        .unwrap_or(max_bounds.right);
-                    next.right = candidate.max(base.right).min(max_bounds.right);
-                }
-                _ => {}
+        };
+
+        match axis_order {
+            AxisPassOrder::VerticalThenHorizontal => {
+                apply_vertical(&mut next);
+                apply_horizontal(&mut next);
+            }
+            AxisPassOrder::HorizontalThenVertical => {
+                apply_horizontal(&mut next);
+                apply_vertical(&mut next);
             }
         }
 
         next
     }
 
-    fn expand_constrained_with_limit(
+    fn expand_constrained_with_limit_for_order(
         &self,
         blockers: &[Rectangle],
         directions: &[ExpandDirection],
         maximum_bounds: &Rectangle,
         max_iterations: usize,
+        axis_order: AxisPassOrder,
     ) -> Result<Rectangle, ExpandError> {
         if directions.is_empty() {
             return Err(ExpandError::EmptyDirections);
@@ -299,6 +364,7 @@ impl Rectangle {
                 &normalized_blockers,
                 directions,
                 max_bounds,
+                axis_order,
             );
             if next == current {
                 return Ok(next);
@@ -308,6 +374,43 @@ impl Rectangle {
 
         history.push(current);
         Ok(Rectangle::pick_smallest_rect(&history))
+    }
+
+    fn expand_constrained_with_limit(
+        &self,
+        blockers: &[Rectangle],
+        directions: &[ExpandDirection],
+        maximum_bounds: &Rectangle,
+        max_iterations: usize,
+    ) -> Result<Rectangle, ExpandError> {
+        if !Rectangle::has_mixed_axes(directions) {
+            return self.expand_constrained_with_limit_for_order(
+                blockers,
+                directions,
+                maximum_bounds,
+                max_iterations,
+                AxisPassOrder::VerticalThenHorizontal,
+            );
+        }
+
+        let vertical_first = self.expand_constrained_with_limit_for_order(
+            blockers,
+            directions,
+            maximum_bounds,
+            max_iterations,
+            AxisPassOrder::VerticalThenHorizontal,
+        )?;
+        let horizontal_first = self.expand_constrained_with_limit_for_order(
+            blockers,
+            directions,
+            maximum_bounds,
+            max_iterations,
+            AxisPassOrder::HorizontalThenVertical,
+        )?;
+        Ok(Rectangle::pick_larger_rect(
+            vertical_first,
+            horizontal_first,
+        ))
     }
 
     pub fn expand_constrained(
@@ -343,6 +446,12 @@ pub enum ExpandDirection {
     Down,
     Left,
     Right,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AxisPassOrder {
+    VerticalThenHorizontal,
+    HorizontalThenVertical,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -436,6 +545,7 @@ struct FontMetrics {
     single_byte_encoding: SingleByteEncoding,
     single_byte_overrides: HashMap<u32, char>,
     cid_widths: Vec<CidWidthRange>,
+    cid_width_lookup: CidWidthLookup,
     cid_default_width: i64,
 }
 
@@ -464,12 +574,28 @@ impl FontMetrics {
     }
 
     fn width_cid(&self, code: u32) -> f64 {
-        for range in &self.cid_widths {
-            if code >= range.start && code <= range.end {
-                return range.width as f64;
+        match &self.cid_width_lookup {
+            CidWidthLookup::Linear => {
+                for range in &self.cid_widths {
+                    if code >= range.start && code <= range.end {
+                        return range.width as f64;
+                    }
+                }
+                self.cid_default_width as f64
+            }
+            CidWidthLookup::BinarySearch(ranges) => {
+                let candidate = ranges.partition_point(|range| range.start <= code);
+                if candidate == 0 {
+                    return self.cid_default_width as f64;
+                }
+                let range = &ranges[candidate - 1];
+                if code <= range.end {
+                    range.width as f64
+                } else {
+                    self.cid_default_width as f64
+                }
             }
         }
-        self.cid_default_width as f64
     }
 }
 
@@ -479,10 +605,49 @@ const TYPE3_FALLBACK_TEXT_HEIGHT: f64 = 1.0;
 const TYPE3_UNITS_EPSILON: f64 = 1e-9;
 const MAX_TRACKED_PAINTED_FILLS: usize = 4096;
 const MIN_TEXT_BACKGROUND_CONTRAST_RATIO: f64 = 1.05;
+const MIN_CLIPPED_GLYPH_VISIBLE_FRACTION: f64 = 0.25;
+const GLYPH_AREA_EPSILON: f64 = 1e-9;
+const PAINTED_FILL_INDEX_THRESHOLD: usize = 256;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExtractParallelMode {
+    Auto,
+    On,
+    Off,
+}
+
+fn extract_parallel_mode() -> ExtractParallelMode {
+    let Ok(raw) = std::env::var("REAP_EXTRACT_PARALLEL") else {
+        return ExtractParallelMode::Auto;
+    };
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "on" => ExtractParallelMode::On,
+        "off" => ExtractParallelMode::Off,
+        _ => ExtractParallelMode::Auto,
+    }
+}
+
+fn can_parallelize() -> bool {
+    std::thread::available_parallelism()
+        .map(|n| n.get() > 1)
+        .unwrap_or(false)
+}
+
+fn should_parallel_extract_with_mode(
+    page_count: usize,
+    mode_override: Option<ExtractParallelMode>,
+) -> bool {
+    match mode_override.unwrap_or_else(extract_parallel_mode) {
+        ExtractParallelMode::Off => false,
+        ExtractParallelMode::On => page_count > 1 && can_parallelize(),
+        ExtractParallelMode::Auto => page_count >= 4 && can_parallelize(),
+    }
+}
 
 #[derive(Debug, Clone)]
 struct TextState {
     font: Option<String>,
+    current_font_id: Option<usize>,
     font_size: f64,
     char_spacing: f64,
     word_spacing: f64,
@@ -615,6 +780,7 @@ impl TextState {
     fn new() -> Self {
         Self {
             font: None,
+            current_font_id: None,
             font_size: 12.0,
             char_spacing: 0.0,
             word_spacing: 0.0,
@@ -632,21 +798,244 @@ impl TextState {
     }
 }
 
-type FontMapCache = HashMap<usize, Arc<HashMap<String, FontMetrics>>>;
+type FontMapCache = HashMap<usize, FontResolver>;
 
-pub fn extract_char_bboxes(doc: &PdfDoc) -> Vec<CharBBox> {
-    let pages = collect_pages(doc);
-    let layouts = page_layouts_for_pages(doc, &pages);
-    let raw = extract_char_bboxes_raw_from_pages(doc, &pages);
-    canonicalize_char_bboxes(raw, &layouts)
+#[derive(Default)]
+struct DecodedStreamCache {
+    by_ref: HashMap<(u32, u16), Vec<u8>>,
 }
 
-fn extract_char_bboxes_raw_from_pages(doc: &PdfDoc, pages: &[Object]) -> Vec<CharBBox> {
+impl DecodedStreamCache {
+    fn decode_stream(&mut self, doc: &PdfDoc, obj: &Object) -> Option<Vec<u8>> {
+        if let Object::Reference { obj_num, gen_num } = obj {
+            let key = (*obj_num, *gen_num);
+            if let Some(cached) = self.by_ref.get(&key) {
+                return Some(cached.clone());
+            }
+            let decoded = decode_stream(doc, obj)?;
+            self.by_ref.insert(key, decoded.clone());
+            return Some(decoded);
+        }
+        decode_stream(doc, obj)
+    }
+}
+
+#[derive(Default)]
+struct FontResolver {
+    resources: Option<Object>,
+    id_by_name: HashMap<String, usize>,
+    metrics_by_id: Vec<FontMetrics>,
+}
+
+impl FontResolver {
+    fn from_resources(resources: Option<&Object>) -> Self {
+        Self {
+            resources: resources.cloned(),
+            id_by_name: HashMap::new(),
+            metrics_by_id: Vec::new(),
+        }
+    }
+
+    fn ensure_font(
+        &mut self,
+        doc: &PdfDoc,
+        decoded_stream_cache: &mut DecodedStreamCache,
+        font_name: &str,
+    ) -> Option<usize> {
+        if let Some(&font_id) = self.id_by_name.get(font_name) {
+            return Some(font_id);
+        }
+
+        let mut built = build_font_map(
+            doc,
+            self.resources.as_ref(),
+            decoded_stream_cache,
+            Some(font_name),
+        );
+        let metrics = built.remove(font_name)?;
+        let font_id = self.metrics_by_id.len();
+        self.id_by_name.insert(font_name.to_string(), font_id);
+        self.metrics_by_id.push(metrics);
+        Some(font_id)
+    }
+
+    fn font_by_id(&self, font_id: usize) -> Option<&FontMetrics> {
+        self.metrics_by_id.get(font_id)
+    }
+}
+
+#[derive(Debug)]
+struct PaintedFillIndex {
+    bounds: Rect,
+    buckets_per_axis: usize,
+    bucket_width: f64,
+    bucket_height: f64,
+    buckets: Vec<Vec<usize>>,
+}
+
+impl PaintedFillIndex {
+    fn build(painted_fills: &[PaintedFill]) -> Option<Self> {
+        if painted_fills.len() < PAINTED_FILL_INDEX_THRESHOLD {
+            return None;
+        }
+
+        let mut bounds = painted_fills.first().map(|fill| fill.bbox)?;
+        for fill in painted_fills.iter().skip(1) {
+            bounds = bounds.union(fill.bbox);
+        }
+        if bounds.is_empty() {
+            return None;
+        }
+
+        let buckets_per_axis = ((painted_fills.len() as f64).sqrt().ceil() as usize).clamp(4, 64);
+        let bucket_width = ((bounds.max_x - bounds.min_x) / buckets_per_axis as f64).max(1e-9);
+        let bucket_height = ((bounds.max_y - bounds.min_y) / buckets_per_axis as f64).max(1e-9);
+        let buckets = vec![Vec::new(); buckets_per_axis * buckets_per_axis];
+
+        let mut index = Self {
+            bounds,
+            buckets_per_axis,
+            bucket_width,
+            bucket_height,
+            buckets,
+        };
+        for (fill_index, fill) in painted_fills.iter().enumerate() {
+            let (min_col, max_col, min_row, max_row) = index.bucket_range(fill.bbox);
+            for row in min_row..=max_row {
+                for col in min_col..=max_col {
+                    index.buckets[row * buckets_per_axis + col].push(fill_index);
+                }
+            }
+        }
+        Some(index)
+    }
+
+    fn for_each_candidate<F>(&self, query: Rect, mut f: F)
+    where
+        F: FnMut(usize),
+    {
+        if !self.bounds.intersects(&query) {
+            return;
+        }
+        let (min_col, max_col, min_row, max_row) = self.bucket_range(query);
+        for row in min_row..=max_row {
+            for col in min_col..=max_col {
+                for &fill_index in &self.buckets[row * self.buckets_per_axis + col] {
+                    f(fill_index);
+                }
+            }
+        }
+    }
+
+    fn bucket_range(&self, rect: Rect) -> (usize, usize, usize, usize) {
+        let min_col = self.bucket_col(rect.min_x);
+        let max_col = self.bucket_col(rect.max_x);
+        let min_row = self.bucket_row(rect.min_y);
+        let max_row = self.bucket_row(rect.max_y);
+        (
+            min_col.min(max_col),
+            min_col.max(max_col),
+            min_row.min(max_row),
+            min_row.max(max_row),
+        )
+    }
+
+    fn bucket_col(&self, x: f64) -> usize {
+        let col = ((x - self.bounds.min_x) / self.bucket_width).floor() as isize;
+        col.clamp(0, self.buckets_per_axis.saturating_sub(1) as isize) as usize
+    }
+
+    fn bucket_row(&self, y: f64) -> usize {
+        let row = ((y - self.bounds.min_y) / self.bucket_height).floor() as isize;
+        row.clamp(0, self.buckets_per_axis.saturating_sub(1) as isize) as usize
+    }
+}
+
+pub fn extract_char_bboxes(doc: &PdfDoc) -> Vec<CharBBox> {
+    extract_char_bboxes_with_parallel_mode(doc, None)
+}
+
+pub fn extract_char_bboxes_with_parallel_mode(
+    doc: &PdfDoc,
+    parallel_mode: Option<ExtractParallelMode>,
+) -> Vec<CharBBox> {
+    let pages = collect_pages(doc);
+    let layouts = page_layouts_for_pages(doc, &pages);
+    let raw = extract_char_bboxes_raw_from_pages(doc, &pages, parallel_mode);
+    let canonicalized = canonicalize_char_bboxes(raw, &layouts);
+    dedupe_exact_chars(canonicalized)
+}
+
+fn extract_char_bboxes_for_page(doc: &PdfDoc, page_index: usize, page: &Object) -> Vec<CharBBox> {
     let mut out = Vec::new();
     let mut font_map_cache: FontMapCache = HashMap::new();
+    let mut decoded_stream_cache = DecodedStreamCache::default();
+    let page_clip = page_clip_rect(doc, page);
+    let (resources, contents) = page_resources_and_contents(doc, page);
+    let content_bytes = decode_contents(doc, &contents, &mut decoded_stream_cache);
+    let ctm = Matrix::identity();
+    let text_state = TextState::new();
+    process_content(
+        doc,
+        page_index,
+        resources,
+        &content_bytes,
+        ctm,
+        text_state,
+        page_clip,
+        &mut font_map_cache,
+        &mut decoded_stream_cache,
+        &mut out,
+    );
+    for (bytes, ann_resources, ann_matrix) in
+        annotation_appearance_streams(doc, page, &mut decoded_stream_cache)
+    {
+        let text_state = TextState::new();
+        process_content(
+            doc,
+            page_index,
+            ann_resources.or(resources),
+            &bytes,
+            ann_matrix,
+            text_state,
+            page_clip,
+            &mut font_map_cache,
+            &mut decoded_stream_cache,
+            &mut out,
+        );
+    }
+    out
+}
+
+fn extract_char_bboxes_raw_from_pages(
+    doc: &PdfDoc,
+    pages: &[Object],
+    parallel_mode: Option<ExtractParallelMode>,
+) -> Vec<CharBBox> {
+    if should_parallel_extract_with_mode(pages.len(), parallel_mode) {
+        extract_char_bboxes_raw_parallel_from_pages(doc, pages)
+    } else {
+        extract_char_bboxes_raw_serial_from_pages(doc, pages)
+    }
+}
+
+fn extract_char_bboxes_raw_parallel_from_pages(doc: &PdfDoc, pages: &[Object]) -> Vec<CharBBox> {
+    let per_page: Vec<Vec<CharBBox>> = pages
+        .par_iter()
+        .enumerate()
+        .map(|(page_index, page)| extract_char_bboxes_for_page(doc, page_index, page))
+        .collect();
+    per_page.into_iter().flatten().collect()
+}
+
+fn extract_char_bboxes_raw_serial_from_pages(doc: &PdfDoc, pages: &[Object]) -> Vec<CharBBox> {
+    let mut out = Vec::new();
+    let mut font_map_cache: FontMapCache = HashMap::new();
+    let mut decoded_stream_cache = DecodedStreamCache::default();
     for (page_index, page) in pages.iter().enumerate() {
+        let page_clip = page_clip_rect(doc, page);
         let (resources, contents) = page_resources_and_contents(doc, page);
-        let content_bytes = decode_contents(doc, &contents);
+        let content_bytes = decode_contents(doc, &contents, &mut decoded_stream_cache);
         let ctm = Matrix::identity();
         let text_state = TextState::new();
         process_content(
@@ -656,10 +1045,14 @@ fn extract_char_bboxes_raw_from_pages(doc: &PdfDoc, pages: &[Object]) -> Vec<Cha
             &content_bytes,
             ctm,
             text_state,
+            page_clip,
             &mut font_map_cache,
+            &mut decoded_stream_cache,
             &mut out,
         );
-        for (bytes, ann_resources, ann_matrix) in annotation_appearance_streams(doc, page) {
+        for (bytes, ann_resources, ann_matrix) in
+            annotation_appearance_streams(doc, page, &mut decoded_stream_cache)
+        {
             let text_state = TextState::new();
             process_content(
                 doc,
@@ -668,7 +1061,9 @@ fn extract_char_bboxes_raw_from_pages(doc: &PdfDoc, pages: &[Object]) -> Vec<Cha
                 &bytes,
                 ann_matrix,
                 text_state,
+                page_clip,
                 &mut font_map_cache,
+                &mut decoded_stream_cache,
                 &mut out,
             );
         }
@@ -835,12 +1230,76 @@ impl BlockAccumulator {
     }
 }
 
-fn extract_text_blocks_raw(doc: &PdfDoc, pages: &[Object]) -> Vec<TextBlock> {
+fn extract_text_blocks_for_page(doc: &PdfDoc, page_index: usize, page: &Object) -> Vec<TextBlock> {
     let mut blocks = BlockAccumulator::default();
     let mut font_map_cache: FontMapCache = HashMap::new();
+    let mut decoded_stream_cache = DecodedStreamCache::default();
+    let page_clip = page_clip_rect(doc, page);
+    let (resources, contents) = page_resources_and_contents(doc, page);
+    let content_bytes = decode_contents(doc, &contents, &mut decoded_stream_cache);
+    let ctm = Matrix::identity();
+    let text_state = TextState::new();
+    process_content_with_blocks(
+        doc,
+        page_index,
+        resources,
+        &content_bytes,
+        ctm,
+        text_state,
+        page_clip,
+        &mut font_map_cache,
+        &mut decoded_stream_cache,
+        &mut blocks,
+    );
+    for (bytes, ann_resources, ann_matrix) in
+        annotation_appearance_streams(doc, page, &mut decoded_stream_cache)
+    {
+        let text_state = TextState::new();
+        process_content_with_blocks(
+            doc,
+            page_index,
+            ann_resources.or(resources),
+            &bytes,
+            ann_matrix,
+            text_state,
+            page_clip,
+            &mut font_map_cache,
+            &mut decoded_stream_cache,
+            &mut blocks,
+        );
+    }
+    blocks.finish()
+}
+
+fn extract_text_blocks_raw(
+    doc: &PdfDoc,
+    pages: &[Object],
+    parallel_mode: Option<ExtractParallelMode>,
+) -> Vec<TextBlock> {
+    if should_parallel_extract_with_mode(pages.len(), parallel_mode) {
+        extract_text_blocks_raw_parallel_from_pages(doc, pages)
+    } else {
+        extract_text_blocks_raw_serial_from_pages(doc, pages)
+    }
+}
+
+fn extract_text_blocks_raw_parallel_from_pages(doc: &PdfDoc, pages: &[Object]) -> Vec<TextBlock> {
+    let per_page: Vec<Vec<TextBlock>> = pages
+        .par_iter()
+        .enumerate()
+        .map(|(page_index, page)| extract_text_blocks_for_page(doc, page_index, page))
+        .collect();
+    per_page.into_iter().flatten().collect()
+}
+
+fn extract_text_blocks_raw_serial_from_pages(doc: &PdfDoc, pages: &[Object]) -> Vec<TextBlock> {
+    let mut blocks = BlockAccumulator::default();
+    let mut font_map_cache: FontMapCache = HashMap::new();
+    let mut decoded_stream_cache = DecodedStreamCache::default();
     for (page_index, page) in pages.iter().enumerate() {
+        let page_clip = page_clip_rect(doc, page);
         let (resources, contents) = page_resources_and_contents(doc, page);
-        let content_bytes = decode_contents(doc, &contents);
+        let content_bytes = decode_contents(doc, &contents, &mut decoded_stream_cache);
         let ctm = Matrix::identity();
         let text_state = TextState::new();
         process_content_with_blocks(
@@ -850,10 +1309,14 @@ fn extract_text_blocks_raw(doc: &PdfDoc, pages: &[Object]) -> Vec<TextBlock> {
             &content_bytes,
             ctm,
             text_state,
+            page_clip,
             &mut font_map_cache,
+            &mut decoded_stream_cache,
             &mut blocks,
         );
-        for (bytes, ann_resources, ann_matrix) in annotation_appearance_streams(doc, page) {
+        for (bytes, ann_resources, ann_matrix) in
+            annotation_appearance_streams(doc, page, &mut decoded_stream_cache)
+        {
             let text_state = TextState::new();
             process_content_with_blocks(
                 doc,
@@ -862,7 +1325,9 @@ fn extract_text_blocks_raw(doc: &PdfDoc, pages: &[Object]) -> Vec<TextBlock> {
                 &bytes,
                 ann_matrix,
                 text_state,
+                page_clip,
                 &mut font_map_cache,
+                &mut decoded_stream_cache,
                 &mut blocks,
             );
         }
@@ -871,28 +1336,108 @@ fn extract_text_blocks_raw(doc: &PdfDoc, pages: &[Object]) -> Vec<TextBlock> {
 }
 
 pub fn extract_text_blocks(doc: &PdfDoc) -> Vec<TextBlock> {
+    extract_text_blocks_with_parallel_mode(doc, None)
+}
+
+pub fn extract_text_blocks_with_parallel_mode(
+    doc: &PdfDoc,
+    parallel_mode: Option<ExtractParallelMode>,
+) -> Vec<TextBlock> {
     let pages = collect_pages(doc);
     let layouts = page_layouts_for_pages(doc, &pages);
-    let raw = extract_text_blocks_raw(doc, &pages);
-    canonicalize_text_blocks(raw, &layouts)
+    let raw = extract_text_blocks_raw(doc, &pages, parallel_mode);
+    let canonicalized = canonicalize_text_blocks(raw, &layouts);
+    dedupe_exact_blocks(canonicalized)
 }
 
 pub fn extract_char_bboxes_with_style(doc: &PdfDoc) -> Vec<(CharBBox, TextStyle)> {
     let pages = collect_pages(doc);
     let layouts = page_layouts_for_pages(doc, &pages);
-    let raw = extract_char_bboxes_with_style_raw_from_pages(doc, &pages);
-    canonicalize_char_bboxes_with_style(raw, &layouts)
+    let raw = extract_char_bboxes_with_style_raw_from_pages(doc, &pages, None);
+    let canonicalized = canonicalize_char_bboxes_with_style(raw, &layouts);
+    dedupe_exact_chars_with_style(canonicalized)
+}
+
+fn extract_char_bboxes_with_style_for_page(
+    doc: &PdfDoc,
+    page_index: usize,
+    page: &Object,
+) -> Vec<(CharBBox, TextStyle)> {
+    let mut out = Vec::new();
+    let mut font_map_cache: FontMapCache = HashMap::new();
+    let mut decoded_stream_cache = DecodedStreamCache::default();
+    let page_clip = page_clip_rect(doc, page);
+    let (resources, contents) = page_resources_and_contents(doc, page);
+    let content_bytes = decode_contents(doc, &contents, &mut decoded_stream_cache);
+    let ctm = Matrix::identity();
+    let text_state = TextState::new();
+    process_content_with_style(
+        doc,
+        page_index,
+        resources,
+        &content_bytes,
+        ctm,
+        text_state,
+        page_clip,
+        &mut font_map_cache,
+        &mut decoded_stream_cache,
+        &mut out,
+    );
+    for (bytes, ann_resources, ann_matrix) in
+        annotation_appearance_streams(doc, page, &mut decoded_stream_cache)
+    {
+        let text_state = TextState::new();
+        process_content_with_style(
+            doc,
+            page_index,
+            ann_resources.or(resources),
+            &bytes,
+            ann_matrix,
+            text_state,
+            page_clip,
+            &mut font_map_cache,
+            &mut decoded_stream_cache,
+            &mut out,
+        );
+    }
+    out
 }
 
 fn extract_char_bboxes_with_style_raw_from_pages(
     doc: &PdfDoc,
     pages: &[Object],
+    parallel_mode: Option<ExtractParallelMode>,
+) -> Vec<(CharBBox, TextStyle)> {
+    if should_parallel_extract_with_mode(pages.len(), parallel_mode) {
+        extract_char_bboxes_with_style_raw_parallel_from_pages(doc, pages)
+    } else {
+        extract_char_bboxes_with_style_raw_serial_from_pages(doc, pages)
+    }
+}
+
+fn extract_char_bboxes_with_style_raw_parallel_from_pages(
+    doc: &PdfDoc,
+    pages: &[Object],
+) -> Vec<(CharBBox, TextStyle)> {
+    let per_page: Vec<Vec<(CharBBox, TextStyle)>> = pages
+        .par_iter()
+        .enumerate()
+        .map(|(page_index, page)| extract_char_bboxes_with_style_for_page(doc, page_index, page))
+        .collect();
+    per_page.into_iter().flatten().collect()
+}
+
+fn extract_char_bboxes_with_style_raw_serial_from_pages(
+    doc: &PdfDoc,
+    pages: &[Object],
 ) -> Vec<(CharBBox, TextStyle)> {
     let mut out = Vec::new();
     let mut font_map_cache: FontMapCache = HashMap::new();
+    let mut decoded_stream_cache = DecodedStreamCache::default();
     for (page_index, page) in pages.iter().enumerate() {
+        let page_clip = page_clip_rect(doc, page);
         let (resources, contents) = page_resources_and_contents(doc, page);
-        let content_bytes = decode_contents(doc, &contents);
+        let content_bytes = decode_contents(doc, &contents, &mut decoded_stream_cache);
         let ctm = Matrix::identity();
         let text_state = TextState::new();
         process_content_with_style(
@@ -902,10 +1447,14 @@ fn extract_char_bboxes_with_style_raw_from_pages(
             &content_bytes,
             ctm,
             text_state,
+            page_clip,
             &mut font_map_cache,
+            &mut decoded_stream_cache,
             &mut out,
         );
-        for (bytes, ann_resources, ann_matrix) in annotation_appearance_streams(doc, page) {
+        for (bytes, ann_resources, ann_matrix) in
+            annotation_appearance_streams(doc, page, &mut decoded_stream_cache)
+        {
             let text_state = TextState::new();
             process_content_with_style(
                 doc,
@@ -914,7 +1463,9 @@ fn extract_char_bboxes_with_style_raw_from_pages(
                 &bytes,
                 ann_matrix,
                 text_state,
+                page_clip,
                 &mut font_map_cache,
+                &mut decoded_stream_cache,
                 &mut out,
             );
         }
@@ -929,7 +1480,9 @@ fn process_content(
     content_bytes: &[u8],
     ctm: Matrix,
     text_state: TextState,
+    initial_clip: Option<Rect>,
     font_map_cache: &mut FontMapCache,
+    decoded_stream_cache: &mut DecodedStreamCache,
     out: &mut Vec<CharBBox>,
 ) {
     let mut painted_fills = Vec::new();
@@ -940,8 +1493,10 @@ fn process_content(
         content_bytes,
         ctm,
         text_state,
+        initial_clip,
         &mut painted_fills,
         font_map_cache,
+        decoded_stream_cache,
         out,
         show_text,
     );
@@ -954,7 +1509,9 @@ fn process_content_with_style(
     content_bytes: &[u8],
     ctm: Matrix,
     text_state: TextState,
+    initial_clip: Option<Rect>,
     font_map_cache: &mut FontMapCache,
+    decoded_stream_cache: &mut DecodedStreamCache,
     out: &mut Vec<(CharBBox, TextStyle)>,
 ) {
     let mut painted_fills = Vec::new();
@@ -965,8 +1522,10 @@ fn process_content_with_style(
         content_bytes,
         ctm,
         text_state,
+        initial_clip,
         &mut painted_fills,
         font_map_cache,
+        decoded_stream_cache,
         out,
         show_text_with_style,
     );
@@ -979,7 +1538,9 @@ fn process_content_with_blocks(
     content_bytes: &[u8],
     ctm: Matrix,
     text_state: TextState,
+    initial_clip: Option<Rect>,
     font_map_cache: &mut FontMapCache,
+    decoded_stream_cache: &mut DecodedStreamCache,
     out: &mut BlockAccumulator,
 ) {
     let mut painted_fills = Vec::new();
@@ -990,8 +1551,10 @@ fn process_content_with_blocks(
         content_bytes,
         ctm,
         text_state,
+        initial_clip,
         &mut painted_fills,
         font_map_cache,
+        decoded_stream_cache,
         out,
         show_text_for_block_accumulator,
     );
@@ -1004,18 +1567,21 @@ fn process_content_impl<C, F>(
     content_bytes: &[u8],
     mut ctm: Matrix,
     text_state: TextState,
+    initial_clip: Option<Rect>,
     painted_fills: &mut Vec<PaintedFill>,
     font_map_cache: &mut FontMapCache,
+    decoded_stream_cache: &mut DecodedStreamCache,
     out: &mut C,
     emit_text: F,
 ) where
     F: Fn(
             usize,
-            &HashMap<String, FontMetrics>,
+            Option<&FontMetrics>,
             &mut TextState,
             &Matrix,
             Option<Rect>,
             &[PaintedFill],
+            Option<&PaintedFillIndex>,
             bool,
             &[u8],
             &mut C,
@@ -1025,20 +1591,18 @@ fn process_content_impl<C, F>(
     let mut ctm_stack: Vec<Matrix> = Vec::new();
     let mut state_stack: Vec<TextState> = Vec::new();
     let mut clip_stack: Vec<Option<Rect>> = Vec::new();
-    let mut current_clip: Option<Rect> = None;
+    let mut current_clip: Option<Rect> = initial_clip;
     let mut path_points: Vec<(f64, f64)> = Vec::new();
     let mut path_bbox: Option<Rect> = None;
     let mut marked_content_stack: Vec<MarkedContentScope> = Vec::new();
+    let mut painted_fill_index: Option<PaintedFillIndex> = None;
+    let mut painted_fill_index_last_len = 0usize;
     let mut tokenizer = ContentTokenizer::new(content_bytes);
     let mut operands: Vec<Object> = Vec::with_capacity(8);
     let font_map_key = resources.map_or(0usize, |r| r as *const Object as usize);
-    let font_map = if let Some(cached) = font_map_cache.get(&font_map_key) {
-        cached.clone()
-    } else {
-        let built = Arc::new(build_font_map(doc, resources));
-        font_map_cache.insert(font_map_key, built.clone());
-        built
-    };
+    font_map_cache
+        .entry(font_map_key)
+        .or_insert_with(|| FontResolver::from_resources(resources));
     let resources_dict = resources.and_then(|r| r.as_dict());
     let xobject_dict = resources_dict
         .and_then(|d| d.get("XObject"))
@@ -1048,39 +1612,39 @@ fn process_content_impl<C, F>(
         .and_then(|v| doc.resolve(v).as_dict());
 
     while let Some(op) = tokenizer.next_op_into(&mut operands) {
-        match op.as_str() {
-            "cs" => {
+        match op {
+            Keyword::Opcs => {
                 if let Some(Object::Name(name)) = operands.first() {
                     text_state.fill_color_space =
                         resolve_non_stroking_color_space_kind(doc, resources_dict, name);
                 }
             }
-            "g" | "rg" | "k" | "sc" | "scn" => {
+            Keyword::Opg | Keyword::Oprg | Keyword::Opk | Keyword::Opsc | Keyword::Opscn => {
                 if let Some(rgb) =
                     parse_non_stroking_rgb(op.as_str(), &operands, text_state.fill_color_space)
                 {
                     text_state.fill_rgb = Some(rgb);
                 }
-                if op == "g" {
+                if op == Keyword::Opg {
                     text_state.fill_color_space = ColorSpaceKind::DeviceGray;
-                } else if op == "rg" {
+                } else if op == Keyword::Oprg {
                     text_state.fill_color_space = ColorSpaceKind::DeviceRgb;
-                } else if op == "k" {
+                } else if op == Keyword::Opk {
                     text_state.fill_color_space = ColorSpaceKind::DeviceCmyk;
                 }
             }
-            "BMC" | "BDC" => {
+            Keyword::OpBMC | Keyword::OpBDC => {
                 marked_content_stack.push(marked_content_scope_from_operands(&operands));
             }
-            "EMC" => {
+            Keyword::OpEMC => {
                 let _ = marked_content_stack.pop();
             }
-            "q" => {
+            Keyword::Opq => {
                 ctm_stack.push(ctm);
                 state_stack.push(text_state.clone());
                 clip_stack.push(current_clip);
             }
-            "Q" => {
+            Keyword::OpQ => {
                 if let Some(prev) = ctm_stack.pop() {
                     ctm = prev;
                 }
@@ -1091,7 +1655,7 @@ fn process_content_impl<C, F>(
                     current_clip = prev;
                 }
             }
-            "cm" => {
+            Keyword::OpCm => {
                 if operands.len() == 6 {
                     let m = Matrix {
                         a: num(&operands[0]),
@@ -1105,7 +1669,7 @@ fn process_content_impl<C, F>(
                     ctm = ctm.multiply(m);
                 }
             }
-            "m" => {
+            Keyword::Opm => {
                 if operands.len() == 2 {
                     let x = num(&operands[0]);
                     let y = num(&operands[1]);
@@ -1114,7 +1678,7 @@ fn process_content_impl<C, F>(
                     path_points.push(p);
                 }
             }
-            "l" => {
+            Keyword::Opl => {
                 if operands.len() == 2 {
                     let x = num(&operands[0]);
                     let y = num(&operands[1]);
@@ -1122,7 +1686,7 @@ fn process_content_impl<C, F>(
                     path_points.push(p);
                 }
             }
-            "re" => {
+            Keyword::Opre => {
                 if operands.len() == 4 {
                     let x = num(&operands[0]);
                     let y = num(&operands[1]);
@@ -1136,8 +1700,8 @@ fn process_content_impl<C, F>(
                     path_points.clear();
                 }
             }
-            "h" => {}
-            "W" | "W*" => {
+            Keyword::Oph => {}
+            Keyword::OpWClip | Keyword::OpWClipStar => {
                 let mut bbox = path_bbox.or_else(|| Rect::from_points(&path_points));
                 if let Some(b) = bbox.take() {
                     current_clip = Some(if let Some(existing) = current_clip {
@@ -1147,22 +1711,31 @@ fn process_content_impl<C, F>(
                     });
                 }
             }
-            "f" | "F" | "f*" | "B" | "B*" | "b" | "b*" => {
-                capture_painted_fill(
+            Keyword::Opf
+            | Keyword::OpF
+            | Keyword::OpfStar
+            | Keyword::OpB
+            | Keyword::OpBStar
+            | Keyword::Opb
+            | Keyword::OpbStar => {
+                if capture_painted_fill(
                     path_bbox,
                     &path_points,
                     current_clip,
                     &text_state,
                     painted_fills,
-                );
+                ) {
+                    painted_fill_index = None;
+                    painted_fill_index_last_len = 0;
+                }
                 path_points.clear();
                 path_bbox = None;
             }
-            "n" | "S" | "s" => {
+            Keyword::Opn | Keyword::OpS | Keyword::Ops => {
                 path_points.clear();
                 path_bbox = None;
             }
-            "gs" => {
+            Keyword::Opgs => {
                 if let Some(Object::Name(name)) = operands.get(0) {
                     if let Some(gs_dict) = extgstate_dict {
                         if let Some(state_obj) = gs_dict.get(name) {
@@ -1186,11 +1759,11 @@ fn process_content_impl<C, F>(
                     }
                 }
             }
-            "Do" => {
+            Keyword::OpDo => {
                 if let Some(Object::Name(name)) = operands.get(0) {
                     if let Some(xobj_dict) = xobject_dict {
-                        if let Some(xobj) = xobj_dict.get(name) {
-                            let xobj = doc.resolve(xobj);
+                        if let Some(xobj_obj) = xobj_dict.get(name) {
+                            let xobj = doc.resolve(xobj_obj);
                             if let Object::Stream { dict, .. } = xobj {
                                 let subtype = dict.get("Subtype").and_then(|v| v.as_name());
                                 if subtype == Some("Form") {
@@ -1214,7 +1787,9 @@ fn process_content_impl<C, F>(
                                         .unwrap_or_else(Matrix::identity);
                                     let form_resources =
                                         dict.get("Resources").map(|r| doc.resolve(r));
-                                    if let Some(form_bytes) = decode_stream(doc, xobj) {
+                                    if let Some(form_bytes) =
+                                        decoded_stream_cache.decode_stream(doc, xobj_obj)
+                                    {
                                         process_content_impl(
                                             doc,
                                             page_index,
@@ -1222,8 +1797,10 @@ fn process_content_impl<C, F>(
                                             &form_bytes,
                                             ctm.multiply(form_matrix),
                                             text_state.clone(),
+                                            current_clip,
                                             painted_fills,
                                             font_map_cache,
+                                            decoded_stream_cache,
                                             out,
                                             emit_text,
                                         );
@@ -1234,20 +1811,27 @@ fn process_content_impl<C, F>(
                     }
                 }
             }
-            "BT" => {
+            Keyword::OpBT => {
                 text_state.text_matrix = Matrix::identity();
                 text_state.line_matrix = Matrix::identity();
             }
-            "ET" => {}
-            "Tf" => {
+            Keyword::OpET => {}
+            Keyword::OpTf => {
                 if operands.len() >= 2 {
                     if let Some(name) = operands[0].as_name() {
                         text_state.font = Some(name.to_string());
+                        text_state.current_font_id = None;
                     }
                     text_state.font_size = num(&operands[1]);
+                    if let Some(font_name) = text_state.font.as_deref()
+                        && let Some(resolver) = font_map_cache.get_mut(&font_map_key)
+                    {
+                        text_state.current_font_id =
+                            resolver.ensure_font(doc, decoded_stream_cache, font_name);
+                    }
                 }
             }
-            "Tm" => {
+            Keyword::OpTm => {
                 if operands.len() == 6 {
                     let m = Matrix {
                         a: num(&operands[0]),
@@ -1261,7 +1845,7 @@ fn process_content_impl<C, F>(
                     text_state.line_matrix = m;
                 }
             }
-            "Td" => {
+            Keyword::OpTd => {
                 if operands.len() == 2 {
                     let tx = num(&operands[0]);
                     let ty = num(&operands[1]);
@@ -1270,7 +1854,7 @@ fn process_content_impl<C, F>(
                     text_state.text_matrix = text_state.line_matrix;
                 }
             }
-            "TD" => {
+            Keyword::OpTD => {
                 if operands.len() == 2 {
                     let ty = num(&operands[1]);
                     text_state.leading = -ty;
@@ -1280,43 +1864,43 @@ fn process_content_impl<C, F>(
                     text_state.text_matrix = text_state.line_matrix;
                 }
             }
-            "T*" => {
+            Keyword::OpTStar => {
                 let ty = -text_state.leading;
                 text_state.line_matrix =
                     text_state.line_matrix.multiply(Matrix::translate(0.0, ty));
                 text_state.text_matrix = text_state.line_matrix;
             }
-            "TL" => {
+            Keyword::OpTL => {
                 if let Some(v) = operands.get(0) {
                     text_state.leading = num(v);
                 }
             }
-            "Tc" => {
+            Keyword::OpTc => {
                 if let Some(v) = operands.get(0) {
                     text_state.char_spacing = num(v);
                 }
             }
-            "Tw" => {
+            Keyword::OpTw => {
                 if let Some(v) = operands.get(0) {
                     text_state.word_spacing = num(v);
                 }
             }
-            "Tz" => {
+            Keyword::OpTz => {
                 if let Some(v) = operands.get(0) {
                     text_state.horiz_scaling = num(v);
                 }
             }
-            "Ts" => {
+            Keyword::OpTs => {
                 if let Some(v) = operands.get(0) {
                     text_state.rise = num(v);
                 }
             }
-            "Tr" => {
+            Keyword::OpTr => {
                 if let Some(v) = operands.get(0) {
                     text_state.render_mode = v.as_i64().unwrap_or(0);
                 }
             }
-            "'" => {
+            Keyword::OpApostrophe => {
                 let ty = -text_state.leading;
                 text_state.line_matrix =
                     text_state.line_matrix.multiply(Matrix::translate(0.0, ty));
@@ -1324,20 +1908,30 @@ fn process_content_impl<C, F>(
                 if let Some(Object::String(bytes)) = operands.get(0) {
                     let allow_invisible =
                         allow_invisible_tagged_text(&text_state, &marked_content_stack);
-                    emit_text(
+                    let fill_index = ensure_painted_fill_index(
+                        painted_fills,
+                        &mut painted_fill_index,
+                        &mut painted_fill_index_last_len,
+                    );
+                    emit_text_operation(
                         page_index,
-                        font_map.as_ref(),
+                        doc,
+                        font_map_cache,
+                        font_map_key,
+                        decoded_stream_cache,
                         &mut text_state,
                         &ctm,
                         current_clip,
                         painted_fills,
+                        fill_index,
                         allow_invisible,
                         bytes,
                         out,
+                        emit_text,
                     );
                 }
             }
-            "\"" => {
+            Keyword::OpQuote => {
                 if operands.len() >= 3 {
                     text_state.word_spacing = num(&operands[0]);
                     text_state.char_spacing = num(&operands[1]);
@@ -1348,54 +1942,84 @@ fn process_content_impl<C, F>(
                     if let Some(Object::String(bytes)) = operands.get(2) {
                         let allow_invisible =
                             allow_invisible_tagged_text(&text_state, &marked_content_stack);
-                        emit_text(
+                        let fill_index = ensure_painted_fill_index(
+                            painted_fills,
+                            &mut painted_fill_index,
+                            &mut painted_fill_index_last_len,
+                        );
+                        emit_text_operation(
                             page_index,
-                            font_map.as_ref(),
+                            doc,
+                            font_map_cache,
+                            font_map_key,
+                            decoded_stream_cache,
                             &mut text_state,
                             &ctm,
                             current_clip,
                             painted_fills,
+                            fill_index,
                             allow_invisible,
                             bytes,
                             out,
+                            emit_text,
                         );
                     }
                 }
             }
-            "Tj" => {
+            Keyword::OpTj => {
                 if let Some(Object::String(bytes)) = operands.get(0) {
                     let allow_invisible =
                         allow_invisible_tagged_text(&text_state, &marked_content_stack);
-                    emit_text(
+                    let fill_index = ensure_painted_fill_index(
+                        painted_fills,
+                        &mut painted_fill_index,
+                        &mut painted_fill_index_last_len,
+                    );
+                    emit_text_operation(
                         page_index,
-                        font_map.as_ref(),
+                        doc,
+                        font_map_cache,
+                        font_map_key,
+                        decoded_stream_cache,
                         &mut text_state,
                         &ctm,
                         current_clip,
                         painted_fills,
+                        fill_index,
                         allow_invisible,
                         bytes,
                         out,
+                        emit_text,
                     );
                 }
             }
-            "TJ" => {
+            Keyword::OpTJ => {
                 if let Some(Object::Array(items)) = operands.get(0) {
                     for item in items {
                         match item {
                             Object::String(bytes) => {
                                 let allow_invisible =
                                     allow_invisible_tagged_text(&text_state, &marked_content_stack);
-                                emit_text(
+                                let fill_index = ensure_painted_fill_index(
+                                    painted_fills,
+                                    &mut painted_fill_index,
+                                    &mut painted_fill_index_last_len,
+                                );
+                                emit_text_operation(
                                     page_index,
-                                    font_map.as_ref(),
+                                    doc,
+                                    font_map_cache,
+                                    font_map_key,
+                                    decoded_stream_cache,
                                     &mut text_state,
                                     &ctm,
                                     current_clip,
                                     painted_fills,
+                                    fill_index,
                                     allow_invisible,
                                     bytes,
                                     out,
+                                    emit_text,
                                 );
                             }
                             Object::Integer(kern) => {
@@ -1421,6 +2045,75 @@ fn process_content_impl<C, F>(
             }
             _ => {}
         }
+    }
+}
+
+fn ensure_painted_fill_index<'a>(
+    painted_fills: &[PaintedFill],
+    painted_fill_index: &'a mut Option<PaintedFillIndex>,
+    painted_fill_index_last_len: &mut usize,
+) -> Option<&'a PaintedFillIndex> {
+    if painted_fill_index.is_none()
+        && painted_fills.len() >= PAINTED_FILL_INDEX_THRESHOLD
+        && painted_fills.len() != *painted_fill_index_last_len
+    {
+        *painted_fill_index = PaintedFillIndex::build(painted_fills);
+        *painted_fill_index_last_len = painted_fills.len();
+    }
+    painted_fill_index.as_ref()
+}
+
+fn emit_text_operation<C, F>(
+    page_index: usize,
+    doc: &PdfDoc,
+    font_map_cache: &mut FontMapCache,
+    font_map_key: usize,
+    decoded_stream_cache: &mut DecodedStreamCache,
+    text_state: &mut TextState,
+    ctm: &Matrix,
+    current_clip: Option<Rect>,
+    painted_fills: &[PaintedFill],
+    painted_fill_index: Option<&PaintedFillIndex>,
+    allow_invisible: bool,
+    bytes: &[u8],
+    out: &mut C,
+    emit_text: F,
+) where
+    F: Fn(
+            usize,
+            Option<&FontMetrics>,
+            &mut TextState,
+            &Matrix,
+            Option<Rect>,
+            &[PaintedFill],
+            Option<&PaintedFillIndex>,
+            bool,
+            &[u8],
+            &mut C,
+        ) + Copy,
+{
+    let Some(font_name) = text_state.font.as_deref() else {
+        return;
+    };
+    if let Some(resolver) = font_map_cache.get_mut(&font_map_key) {
+        if text_state.current_font_id.is_none() {
+            text_state.current_font_id = resolver.ensure_font(doc, decoded_stream_cache, font_name);
+        }
+        let font = text_state
+            .current_font_id
+            .and_then(|font_id| resolver.font_by_id(font_id));
+        emit_text(
+            page_index,
+            font,
+            text_state,
+            ctm,
+            current_clip,
+            painted_fills,
+            painted_fill_index,
+            allow_invisible,
+            bytes,
+            out,
+        );
     }
 }
 
@@ -1563,22 +2256,22 @@ fn capture_painted_fill(
     current_clip: Option<Rect>,
     text_state: &TextState,
     painted_fills: &mut Vec<PaintedFill>,
-) {
+) -> bool {
     if painted_fills.len() >= MAX_TRACKED_PAINTED_FILLS {
-        return;
+        return false;
     }
     let alpha = text_state.fill_alpha.unwrap_or(1.0);
     if alpha <= 0.0 {
-        return;
+        return false;
     }
     let Some(mut bbox) = path_bbox.or_else(|| Rect::from_points(path_points)) else {
-        return;
+        return false;
     };
     if let Some(clip) = current_clip {
         bbox = bbox.intersect(clip);
     }
     if bbox.is_empty() {
-        return;
+        return false;
     }
     let bg_luminance = text_state.fill_rgb.map(|(r, g, b)| {
         let r = clamp_unit_interval(r);
@@ -1591,6 +2284,7 @@ fn capture_painted_fill(
         ))
     });
     painted_fills.push(PaintedFill { bbox, bg_luminance });
+    true
 }
 
 fn text_render_mode_has_fill(render_mode: i64) -> bool {
@@ -1646,6 +2340,7 @@ fn text_is_visible_at_bbox(
     text_state: &TextState,
     bbox: Rect,
     painted_fills: &[PaintedFill],
+    painted_fill_index: Option<&PaintedFillIndex>,
 ) -> bool {
     if !text_has_paint(text_state) {
         return false;
@@ -1659,6 +2354,34 @@ fn text_is_visible_at_bbox(
             if text_contrast_against_white(text_rgb) >= MIN_TEXT_BACKGROUND_CONTRAST_RATIO {
                 return true;
             }
+            if let Some(index) = painted_fill_index {
+                let mut has_visible_contrast = false;
+                let mut has_unknown_bg = false;
+                index.for_each_candidate(bbox, |fill_index| {
+                    if has_visible_contrast || has_unknown_bg {
+                        return;
+                    }
+                    if let Some(fill) = painted_fills.get(fill_index) {
+                        if !fill.bbox.intersects(&bbox) {
+                            return;
+                        }
+                        if let Some(bg_luminance) = fill.bg_luminance {
+                            let contrast =
+                                contrast_ratio_from_luminance(text_luminance, bg_luminance);
+                            if contrast >= MIN_TEXT_BACKGROUND_CONTRAST_RATIO {
+                                has_visible_contrast = true;
+                            }
+                        } else {
+                            has_unknown_bg = true;
+                        }
+                    }
+                });
+                if has_visible_contrast || has_unknown_bg {
+                    return true;
+                }
+                return false;
+            }
+
             for fill in painted_fills {
                 if !fill.bbox.intersects(&bbox) {
                     continue;
@@ -1675,6 +2398,25 @@ fn text_is_visible_at_bbox(
         }
     }
     true
+}
+
+fn clipped_glyph_visibility_fraction_is_sufficient(
+    raw_bbox: Rect,
+    visible_bbox: Rect,
+    has_clip: bool,
+    allow_invisible_tagged_text: bool,
+) -> bool {
+    if !has_clip || allow_invisible_tagged_text {
+        return true;
+    }
+    let raw_area =
+        ((raw_bbox.max_x - raw_bbox.min_x).max(0.0)) * ((raw_bbox.max_y - raw_bbox.min_y).max(0.0));
+    if raw_area <= GLYPH_AREA_EPSILON {
+        return true;
+    }
+    let visible_area = ((visible_bbox.max_x - visible_bbox.min_x).max(0.0))
+        * ((visible_bbox.max_y - visible_bbox.min_y).max(0.0));
+    (visible_area / raw_area) >= MIN_CLIPPED_GLYPH_VISIBLE_FRACTION
 }
 
 fn text_advance_distance(text_state: &TextState, glyph_w: f64, apply_word_spacing: bool) -> f64 {
@@ -1759,11 +2501,12 @@ fn text_char_count_and_has_space(text: &str) -> (usize, bool) {
 
 fn show_text_impl<C, F>(
     page_index: usize,
-    fonts: &HashMap<String, FontMetrics>,
+    font: Option<&FontMetrics>,
     text_state: &mut TextState,
     ctm: &Matrix,
     clip: Option<Rect>,
     painted_fills: &[PaintedFill],
+    painted_fill_index: Option<&PaintedFillIndex>,
     allow_invisible_tagged_text: bool,
     bytes: &[u8],
     out: &mut C,
@@ -1771,11 +2514,7 @@ fn show_text_impl<C, F>(
 ) where
     F: FnMut(CharBBox, &mut C),
 {
-    let font_name = match &text_state.font {
-        Some(v) => v,
-        None => return,
-    };
-    let font = match fonts.get(font_name) {
+    let font = match font {
         Some(v) => v,
         None => return,
     };
@@ -1821,22 +2560,49 @@ fn show_text_impl<C, F>(
             };
             let total_advance = text_advance_distance(text_state, glyph_w, ch == ' ');
 
-            if let Some(c) = clip {
+            let visible_bbox = if let Some(c) = clip {
                 if !c.intersects(&bbox) {
                     advance_text_matrix_by(text_state, total_advance);
                     return;
                 }
-            }
-            if !needs_visibility_check || text_is_visible_at_bbox(text_state, bbox, painted_fills) {
+                bbox.intersect(c)
+            } else {
+                bbox
+            };
+            let clip_fraction_ok = if clip.is_some()
+                && !allow_invisible_tagged_text
+                && (visible_bbox.min_x > bbox.min_x
+                    || visible_bbox.min_y > bbox.min_y
+                    || visible_bbox.max_x < bbox.max_x
+                    || visible_bbox.max_y < bbox.max_y)
+            {
+                clipped_glyph_visibility_fraction_is_sufficient(
+                    bbox,
+                    visible_bbox,
+                    true,
+                    allow_invisible_tagged_text,
+                )
+            } else {
+                true
+            };
+            if clip_fraction_ok
+                && (!needs_visibility_check
+                    || text_is_visible_at_bbox(
+                        text_state,
+                        visible_bbox,
+                        painted_fills,
+                        painted_fill_index,
+                    ))
+            {
                 push(
                     CharBBox {
                         page_index,
                         ch,
                         bbox: Rectangle {
-                            left: bbox.min_x,
-                            top: bbox.min_y,
-                            right: bbox.max_x,
-                            bottom: bbox.max_y,
+                            left: visible_bbox.min_x,
+                            top: visible_bbox.min_y,
+                            right: visible_bbox.max_x,
+                            bottom: visible_bbox.max_y,
                         },
                     },
                     out,
@@ -1865,7 +2631,7 @@ fn show_text_impl<C, F>(
         let per_char_advance = total_advance / char_count as f64;
         let mut segment_text_matrix = text_state.text_matrix;
         for ch in decoded_text.chars() {
-            let segment_bbox = glyph_rect_with_text_matrix(
+            let raw_segment_bbox = glyph_rect_with_text_matrix(
                 font,
                 segment_text_matrix,
                 ctm,
@@ -1874,18 +2640,49 @@ fn show_text_impl<C, F>(
                 rise,
                 per_char_glyph_w,
             );
-            if !needs_visibility_check
-                || text_is_visible_at_bbox(text_state, segment_bbox, painted_fills)
+            let visible_segment_bbox = if let Some(c) = clip {
+                if !c.intersects(&raw_segment_bbox) {
+                    advance_matrix_by(&mut segment_text_matrix, per_char_advance);
+                    continue;
+                }
+                raw_segment_bbox.intersect(c)
+            } else {
+                raw_segment_bbox
+            };
+            let clip_fraction_ok = if clip.is_some()
+                && !allow_invisible_tagged_text
+                && (visible_segment_bbox.min_x > raw_segment_bbox.min_x
+                    || visible_segment_bbox.min_y > raw_segment_bbox.min_y
+                    || visible_segment_bbox.max_x < raw_segment_bbox.max_x
+                    || visible_segment_bbox.max_y < raw_segment_bbox.max_y)
+            {
+                clipped_glyph_visibility_fraction_is_sufficient(
+                    raw_segment_bbox,
+                    visible_segment_bbox,
+                    true,
+                    allow_invisible_tagged_text,
+                )
+            } else {
+                true
+            };
+            if clip_fraction_ok
+                && (!needs_visibility_check
+                    || text_is_visible_at_bbox(
+                        text_state,
+                        visible_segment_bbox,
+                        painted_fills,
+                        painted_fill_index,
+                    ))
             {
                 push(
                     CharBBox {
                         page_index,
                         ch,
                         bbox: Rectangle {
-                            left: segment_bbox.min_x,
-                            top: segment_bbox.min_y,
-                            right: segment_bbox.max_x,
-                            bottom: segment_bbox.max_y,
+                            left: visible_segment_bbox.min_x,
+                            top: visible_segment_bbox.min_y,
+                            right: visible_segment_bbox.max_x,
+                            bottom: visible_segment_bbox.max_y,
                         },
                     },
                     out,
@@ -1899,22 +2696,24 @@ fn show_text_impl<C, F>(
 
 fn show_text(
     page_index: usize,
-    fonts: &HashMap<String, FontMetrics>,
+    font: Option<&FontMetrics>,
     text_state: &mut TextState,
     ctm: &Matrix,
     clip: Option<Rect>,
     painted_fills: &[PaintedFill],
+    painted_fill_index: Option<&PaintedFillIndex>,
     allow_invisible_tagged_text: bool,
     bytes: &[u8],
     out: &mut Vec<CharBBox>,
 ) {
     show_text_impl(
         page_index,
-        fonts,
+        font,
         text_state,
         ctm,
         clip,
         painted_fills,
+        painted_fill_index,
         allow_invisible_tagged_text,
         bytes,
         out,
@@ -1926,11 +2725,12 @@ fn show_text(
 
 fn show_text_with_style(
     page_index: usize,
-    fonts: &HashMap<String, FontMetrics>,
+    font: Option<&FontMetrics>,
     text_state: &mut TextState,
     ctm: &Matrix,
     clip: Option<Rect>,
     painted_fills: &[PaintedFill],
+    painted_fill_index: Option<&PaintedFillIndex>,
     allow_invisible_tagged_text: bool,
     bytes: &[u8],
     out: &mut Vec<(CharBBox, TextStyle)>,
@@ -1942,11 +2742,12 @@ fn show_text_with_style(
     };
     show_text_impl(
         page_index,
-        fonts,
+        font,
         text_state,
         ctm,
         clip,
         painted_fills,
+        painted_fill_index,
         allow_invisible_tagged_text,
         bytes,
         out,
@@ -1956,11 +2757,12 @@ fn show_text_with_style(
 
 fn show_text_for_block_accumulator(
     page_index: usize,
-    fonts: &HashMap<String, FontMetrics>,
+    font: Option<&FontMetrics>,
     text_state: &mut TextState,
     ctm: &Matrix,
     clip: Option<Rect>,
     painted_fills: &[PaintedFill],
+    painted_fill_index: Option<&PaintedFillIndex>,
     allow_invisible_tagged_text: bool,
     bytes: &[u8],
     out: &mut BlockAccumulator,
@@ -1968,11 +2770,12 @@ fn show_text_for_block_accumulator(
     let font_size = text_state.font_size;
     show_text_impl(
         page_index,
-        fonts,
+        font,
         text_state,
         ctm,
         clip,
         painted_fills,
+        painted_fill_index,
         allow_invisible_tagged_text,
         bytes,
         out,
@@ -1998,10 +2801,35 @@ fn collect_pages(doc: &PdfDoc) -> Vec<Object> {
         let pages_ref = root.as_dict().and_then(|d| d.get("Pages"));
         if let Some(pages_root) = pages_ref {
             let resolved = doc.resolve(pages_root).clone();
-            walk_page_tree(doc, &resolved, None, None, None, &mut pages);
+            walk_page_tree(doc, &resolved, None, None, None, None, &mut pages);
         }
     }
     pages
+}
+
+fn effective_page_box_from_dict(
+    doc: &PdfDoc,
+    page_dict: &HashMap<String, Object>,
+) -> Option<(f64, f64, f64, f64)> {
+    page_dict
+        .get("CropBox")
+        .or_else(|| page_dict.get("MediaBox"))
+        .map(|v| doc.resolve(v))
+        .and_then(parse_rect)
+}
+
+fn page_clip_rect(doc: &PdfDoc, page: &Object) -> Option<Rect> {
+    let page_dict = page.as_dict()?;
+    let (x_min, y_min, x_max, y_max) = page_dict
+        .get("CropBox")
+        .map(|v| doc.resolve(v))
+        .and_then(parse_rect)?;
+    Some(Rect {
+        min_x: x_min,
+        min_y: y_min,
+        max_x: x_max,
+        max_y: y_max,
+    })
 }
 
 fn page_layouts_for_pages(doc: &PdfDoc, pages: &[Object]) -> Vec<PageLayout> {
@@ -2009,12 +2837,10 @@ fn page_layouts_for_pages(doc: &PdfDoc, pages: &[Object]) -> Vec<PageLayout> {
     let mut y_offset = 0.0;
     for page in pages {
         let page_dict = page.as_dict();
-        let media_box = page_dict
-            .and_then(|d| d.get("MediaBox").or_else(|| d.get("CropBox")))
-            .map(|v| doc.resolve(v))
-            .and_then(parse_rect)
+        let page_box = page_dict
+            .and_then(|d| effective_page_box_from_dict(doc, d))
             .unwrap_or((0.0, 0.0, 0.0, 0.0));
-        let (x_min, y_min, x_max, y_max) = normalize_rect_tuple(media_box);
+        let (x_min, y_min, x_max, y_max) = normalize_rect_tuple(page_box);
         let width = (x_max - x_min).max(0.0);
         let height = (y_max - y_min).max(0.0);
         let rotation = normalized_page_rotation(
@@ -2045,10 +2871,16 @@ fn page_layouts_for_pages(doc: &PdfDoc, pages: &[Object]) -> Vec<PageLayout> {
 fn canonicalize_char_bboxes(chars: Vec<CharBBox>, layouts: &[PageLayout]) -> Vec<CharBBox> {
     chars
         .into_iter()
-        .map(|ch| CharBBox {
-            page_index: ch.page_index,
-            ch: ch.ch,
-            bbox: canonicalize_rect(ch.bbox, ch.page_index, layouts),
+        .filter_map(|ch| {
+            let bbox = canonicalize_rect(ch.bbox, ch.page_index, layouts);
+            if !is_valid_canonical_rect(&bbox) {
+                return None;
+            }
+            Some(CharBBox {
+                page_index: ch.page_index,
+                ch: ch.ch,
+                bbox,
+            })
         })
         .collect()
 }
@@ -2059,15 +2891,19 @@ fn canonicalize_char_bboxes_with_style(
 ) -> Vec<(CharBBox, TextStyle)> {
     chars
         .into_iter()
-        .map(|(ch, style)| {
-            (
+        .filter_map(|(ch, style)| {
+            let bbox = canonicalize_rect(ch.bbox, ch.page_index, layouts);
+            if !is_valid_canonical_rect(&bbox) {
+                return None;
+            }
+            Some((
                 CharBBox {
                     page_index: ch.page_index,
                     ch: ch.ch,
-                    bbox: canonicalize_rect(ch.bbox, ch.page_index, layouts),
+                    bbox,
                 },
                 style,
-            )
+            ))
         })
         .collect()
 }
@@ -2075,12 +2911,93 @@ fn canonicalize_char_bboxes_with_style(
 fn canonicalize_text_blocks(blocks: Vec<TextBlock>, layouts: &[PageLayout]) -> Vec<TextBlock> {
     blocks
         .into_iter()
-        .map(|block| TextBlock {
-            page_index: block.page_index,
-            text: block.text,
-            bbox: canonicalize_rect(block.bbox, block.page_index, layouts),
+        .filter_map(|block| {
+            let bbox = canonicalize_rect(block.bbox, block.page_index, layouts);
+            if !is_valid_canonical_rect(&bbox) {
+                return None;
+            }
+            Some(TextBlock {
+                page_index: block.page_index,
+                text: block.text,
+                bbox,
+            })
         })
         .collect()
+}
+
+type RectBits = (u64, u64, u64, u64);
+type CharKey = (usize, char, RectBits);
+type BlockKey = (usize, String, RectBits);
+
+fn non_negative_zero_bits(value: f64) -> u64 {
+    if value == 0.0 {
+        0.0f64.to_bits()
+    } else {
+        value.to_bits()
+    }
+}
+
+fn rect_bits(rect: Rectangle) -> RectBits {
+    let rect = normalize_rectangle(rect);
+    (
+        non_negative_zero_bits(rect.left),
+        non_negative_zero_bits(rect.top),
+        non_negative_zero_bits(rect.right),
+        non_negative_zero_bits(rect.bottom),
+    )
+}
+
+fn dedupe_exact_chars(chars: Vec<CharBBox>) -> Vec<CharBBox> {
+    let mut seen: HashSet<CharKey> = HashSet::new();
+    let mut out = Vec::with_capacity(chars.len());
+    for ch in chars {
+        let key = (ch.page_index, ch.ch, rect_bits(ch.bbox));
+        if seen.insert(key) {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+fn dedupe_exact_blocks(blocks: Vec<TextBlock>) -> Vec<TextBlock> {
+    if blocks.len() < 2 {
+        return blocks;
+    }
+
+    let mut rect_seen: HashSet<(usize, RectBits)> = HashSet::with_capacity(blocks.len());
+    let mut has_rect_duplicates = false;
+    for block in &blocks {
+        let key = (block.page_index, rect_bits(block.bbox));
+        if !rect_seen.insert(key) {
+            has_rect_duplicates = true;
+            break;
+        }
+    }
+    if !has_rect_duplicates {
+        return blocks;
+    }
+
+    let mut seen: HashSet<BlockKey> = HashSet::new();
+    let mut out = Vec::with_capacity(blocks.len());
+    for block in blocks {
+        let key = (block.page_index, block.text.clone(), rect_bits(block.bbox));
+        if seen.insert(key) {
+            out.push(block);
+        }
+    }
+    out
+}
+
+fn dedupe_exact_chars_with_style(chars: Vec<(CharBBox, TextStyle)>) -> Vec<(CharBBox, TextStyle)> {
+    let mut seen: HashSet<CharKey> = HashSet::new();
+    let mut out = Vec::with_capacity(chars.len());
+    for (ch, style) in chars {
+        let key = (ch.page_index, ch.ch, rect_bits(ch.bbox));
+        if seen.insert(key) {
+            out.push((ch, style));
+        }
+    }
+    out
 }
 
 fn canonicalize_rect(rect: Rectangle, page_index: usize, layouts: &[PageLayout]) -> Rectangle {
@@ -2092,6 +3009,20 @@ fn canonicalize_rect(rect: Rectangle, page_index: usize, layouts: &[PageLayout])
     debug_assert!(layout.height >= 0.0);
     debug_assert!(layout.rotated_width >= 0.0);
     debug_assert!(layout.rotated_height >= 0.0);
+
+    if layout.rotation == 0 {
+        let min_x = (normalized.left - layout.x_min).clamp(0.0, layout.rotated_width);
+        let max_x = (normalized.right - layout.x_min).clamp(0.0, layout.rotated_width);
+        let min_y = (normalized.top - layout.y_min).clamp(0.0, layout.rotated_height);
+        let max_y = (normalized.bottom - layout.y_min).clamp(0.0, layout.rotated_height);
+        return normalize_rectangle(Rectangle {
+            left: min_x,
+            right: max_x,
+            top: layout.y_offset + (layout.rotated_height - max_y),
+            bottom: layout.y_offset + (layout.rotated_height - min_y),
+        });
+    }
+
     let local_points = [
         (
             normalized.left - layout.x_min,
@@ -2122,11 +3053,16 @@ fn canonicalize_rect(rect: Rectangle, page_index: usize, layouts: &[PageLayout])
             (min_x.min(x), max_x.max(x), min_y.min(y), max_y.max(y))
         },
     );
+    let clamped_min_x = min_x.clamp(0.0, layout.rotated_width);
+    let clamped_max_x = max_x.clamp(0.0, layout.rotated_width);
+    let clamped_min_y = min_y.clamp(0.0, layout.rotated_height);
+    let clamped_max_y = max_y.clamp(0.0, layout.rotated_height);
+
     normalize_rectangle(Rectangle {
-        left: min_x,
-        right: max_x,
-        top: layout.y_offset + (layout.rotated_height - max_y),
-        bottom: layout.y_offset + (layout.rotated_height - min_y),
+        left: clamped_min_x,
+        right: clamped_max_x,
+        top: layout.y_offset + (layout.rotated_height - clamped_max_y),
+        bottom: layout.y_offset + (layout.rotated_height - clamped_min_y),
     })
 }
 
@@ -2139,11 +3075,16 @@ fn normalize_rectangle(rect: Rectangle) -> Rectangle {
     }
 }
 
+fn is_valid_canonical_rect(rect: &Rectangle) -> bool {
+    rect.left < rect.right && rect.top < rect.bottom
+}
+
 fn walk_page_tree(
     doc: &PdfDoc,
     node: &Object,
     inherited_resources: Option<Object>,
     inherited_media_box: Option<Object>,
+    inherited_crop_box: Option<Object>,
     inherited_rotate: Option<Object>,
     out: &mut Vec<Object>,
 ) {
@@ -2160,6 +3101,10 @@ fn walk_page_tree(
         .get("MediaBox")
         .map(|b| doc.resolve(b).clone())
         .or(inherited_media_box);
+    let crop_box = dict
+        .get("CropBox")
+        .map(|b| doc.resolve(b).clone())
+        .or(inherited_crop_box);
     let rotate = dict
         .get("Rotate")
         .map(|r| doc.resolve(r).clone())
@@ -2173,6 +3118,9 @@ fn walk_page_tree(
                 }
                 if media_box.is_some() && !page_dict.contains_key("MediaBox") {
                     page_dict.insert("MediaBox".to_string(), media_box.clone().unwrap());
+                }
+                if crop_box.is_some() && !page_dict.contains_key("CropBox") {
+                    page_dict.insert("CropBox".to_string(), crop_box.clone().unwrap());
                 }
                 if rotate.is_some() && !page_dict.contains_key("Rotate") {
                     page_dict.insert("Rotate".to_string(), rotate.clone().unwrap());
@@ -2194,6 +3142,7 @@ fn walk_page_tree(
                         kid,
                         resources.clone(),
                         media_box.clone(),
+                        crop_box.clone(),
                         rotate.clone(),
                         out,
                     );
@@ -2235,15 +3184,15 @@ fn page_resources_and_contents<'a>(
     };
     let resources = dict.get("Resources").map(|r| doc.resolve(r));
     let mut contents = Vec::new();
-    if let Some(content) = dict.get("Contents") {
-        let content = doc.resolve(content);
+    if let Some(content_obj) = dict.get("Contents") {
+        let content = doc.resolve(content_obj);
         match content {
             Object::Array(items) => {
                 for item in items {
-                    contents.push(doc.resolve(item));
+                    contents.push(item);
                 }
             }
-            _ => contents.push(content),
+            _ => contents.push(content_obj),
         }
     }
     (resources, contents)
@@ -2252,6 +3201,7 @@ fn page_resources_and_contents<'a>(
 fn annotation_appearance_streams<'a>(
     doc: &'a PdfDoc,
     page: &'a Object,
+    decoded_stream_cache: &mut DecodedStreamCache,
 ) -> Vec<(Vec<u8>, Option<&'a Object>, Matrix)> {
     let mut out = Vec::new();
     let dict = match page.as_dict() {
@@ -2274,13 +3224,13 @@ fn annotation_appearance_streams<'a>(
             Some(v) => v,
             None => continue,
         };
-        let stream = match resolve_appearance_stream(doc, n) {
+        let (stream, stream_source) = match resolve_appearance_stream(doc, n) {
             Some(v) => v,
             None => continue,
         };
         let (dict, bytes) = match &stream {
             Object::Stream { dict, .. } => {
-                let bytes = match decode_stream(doc, &stream) {
+                let bytes = match decoded_stream_cache.decode_stream(doc, stream_source) {
                     Some(v) => v,
                     None => continue,
                 };
@@ -2306,10 +3256,13 @@ fn annotation_appearance_streams<'a>(
     out
 }
 
-fn resolve_appearance_stream<'a>(doc: &'a PdfDoc, obj: &'a Object) -> Option<&'a Object> {
+fn resolve_appearance_stream<'a>(
+    doc: &'a PdfDoc,
+    obj: &'a Object,
+) -> Option<(&'a Object, &'a Object)> {
     let resolved = doc.resolve(obj);
     match resolved {
-        Object::Stream { .. } => Some(resolved),
+        Object::Stream { .. } => Some((resolved, obj)),
         Object::Dictionary(dict) => {
             for value in dict.values() {
                 if let Some(stream) = resolve_appearance_stream(doc, value) {
@@ -2388,7 +3341,12 @@ fn type0_descendant_font_dict<'a>(
         .and_then(|first| first.as_dict())
 }
 
-fn build_font_map(doc: &PdfDoc, resources: Option<&Object>) -> HashMap<String, FontMetrics> {
+fn build_font_map(
+    doc: &PdfDoc,
+    resources: Option<&Object>,
+    decoded_stream_cache: &mut DecodedStreamCache,
+    only_font: Option<&str>,
+) -> HashMap<String, FontMetrics> {
     let mut out = HashMap::new();
     let resources = match resources.and_then(|r| r.as_dict()) {
         Some(v) => v,
@@ -2399,6 +3357,9 @@ fn build_font_map(doc: &PdfDoc, resources: Option<&Object>) -> HashMap<String, F
         None => return out,
     };
     for (name, font_obj) in font_dict {
+        if only_font.is_some_and(|font_name| font_name != name) {
+            continue;
+        }
         let font_obj = doc.resolve(font_obj);
         let dict = match font_obj.as_dict() {
             Some(v) => v,
@@ -2447,7 +3408,7 @@ fn build_font_map(doc: &PdfDoc, resources: Option<&Object>) -> HashMap<String, F
         let mut single_byte_overrides = HashMap::new();
         let to_unicode = dict
             .get("ToUnicode")
-            .and_then(|v| decode_stream(doc, v))
+            .and_then(|v| decoded_stream_cache.decode_stream(doc, v))
             .map(|data| parse_cmap(&data));
 
         let subtype = dict.get("Subtype").and_then(|v| v.as_name());
@@ -2481,7 +3442,7 @@ fn build_font_map(doc: &PdfDoc, resources: Option<&Object>) -> HashMap<String, F
         if subtype == Some("Type0") {
             descendant_dict = type0_descendant_font_dict(doc, dict);
             if let Some(enc) = dict.get("Encoding") {
-                encoding = parse_encoding(doc, enc);
+                encoding = parse_encoding(doc, enc, decoded_stream_cache);
             }
         } else if let Some(enc) = dict.get("Encoding") {
             if let Some((parsed, overrides)) = parse_single_byte_encoding(doc, enc) {
@@ -2520,7 +3481,7 @@ fn build_font_map(doc: &PdfDoc, resources: Option<&Object>) -> HashMap<String, F
         let needs_ttf_fallback = widths_table.is_empty() && !has_cid_widths;
         let mut ttf_metrics: Option<TtfMetrics> = None;
         if needs_ttf_fallback {
-            ttf_metrics = extract_ttf_metrics(doc, metrics_source);
+            ttf_metrics = extract_ttf_metrics(doc, metrics_source, decoded_stream_cache);
             if ttf_metrics.is_none() && canonical_base14.is_none() {
                 ttf_metrics = base_font.as_deref().and_then(extract_system_ttf_metrics);
             }
@@ -2579,6 +3540,7 @@ fn build_font_map(doc: &PdfDoc, resources: Option<&Object>) -> HashMap<String, F
             single_byte_encoding,
             single_byte_overrides,
             cid_widths: cid_widths.clone(),
+            cid_width_lookup: build_cid_width_lookup(&cid_widths),
             cid_default_width,
         };
         out.insert(name.clone(), metrics);
@@ -2586,10 +3548,14 @@ fn build_font_map(doc: &PdfDoc, resources: Option<&Object>) -> HashMap<String, F
     out
 }
 
-fn decode_contents(doc: &PdfDoc, contents: &[&Object]) -> Vec<u8> {
+fn decode_contents(
+    doc: &PdfDoc,
+    contents: &[&Object],
+    decoded_stream_cache: &mut DecodedStreamCache,
+) -> Vec<u8> {
     let mut out = Vec::new();
     for content in contents {
-        if let Some(decoded) = decode_stream(doc, content) {
+        if let Some(decoded) = decoded_stream_cache.decode_stream(doc, content) {
             out.extend_from_slice(&decoded);
             out.push(b'\n');
         }
@@ -2636,12 +3602,16 @@ struct Base14Spec {
     style: Base14Style,
 }
 
-fn extract_ttf_metrics(doc: &PdfDoc, dict: &HashMap<String, Object>) -> Option<TtfMetrics> {
+fn extract_ttf_metrics(
+    doc: &PdfDoc,
+    dict: &HashMap<String, Object>,
+    decoded_stream_cache: &mut DecodedStreamCache,
+) -> Option<TtfMetrics> {
     let descriptor = dict
         .get("FontDescriptor")
         .and_then(|v| doc.resolve(v).as_dict())?;
-    let font_file = descriptor.get("FontFile2").map(|v| doc.resolve(v))?;
-    let data = decode_stream(doc, font_file)?;
+    let font_file = descriptor.get("FontFile2")?;
+    let data = decoded_stream_cache.decode_stream(doc, font_file)?;
     let face = ttf_parser::Face::parse(&data, 0).ok()?;
     build_ttf_metrics_from_face(&face)
 }
@@ -3114,6 +4084,7 @@ fn base14_metrics(name: &str) -> Option<FontMetrics> {
                 single_byte_encoding: SingleByteEncoding::WinAnsi,
                 single_byte_overrides: HashMap::new(),
                 cid_widths: Vec::new(),
+                cid_width_lookup: CidWidthLookup::Linear,
                 cid_default_width: 1000,
             })
         }
@@ -3135,6 +4106,7 @@ fn base14_metrics(name: &str) -> Option<FontMetrics> {
                 single_byte_encoding: SingleByteEncoding::WinAnsi,
                 single_byte_overrides: HashMap::new(),
                 cid_widths: Vec::new(),
+                cid_width_lookup: CidWidthLookup::Linear,
                 cid_default_width: 600,
             })
         }
@@ -3547,6 +4519,7 @@ fn base14_metrics(name: &str) -> Option<FontMetrics> {
                 single_byte_encoding: SingleByteEncoding::WinAnsi,
                 single_byte_overrides: HashMap::new(),
                 cid_widths: Vec::new(),
+                cid_width_lookup: CidWidthLookup::Linear,
                 cid_default_width: 500,
             })
         }
@@ -3567,6 +4540,7 @@ fn base14_metrics(name: &str) -> Option<FontMetrics> {
                 single_byte_encoding: SingleByteEncoding::WinAnsi,
                 single_byte_overrides: HashMap::new(),
                 cid_widths: Vec::new(),
+                cid_width_lookup: CidWidthLookup::Linear,
                 cid_default_width: 500,
             })
         }
@@ -3587,6 +4561,7 @@ fn base14_metrics(name: &str) -> Option<FontMetrics> {
                 single_byte_encoding: SingleByteEncoding::WinAnsi,
                 single_byte_overrides: HashMap::new(),
                 cid_widths: Vec::new(),
+                cid_width_lookup: CidWidthLookup::Linear,
                 cid_default_width: 500,
             })
         }
@@ -3599,6 +4574,37 @@ struct CidWidthRange {
     start: u32,
     end: u32,
     width: i64,
+}
+
+#[derive(Clone, Debug)]
+enum CidWidthLookup {
+    Linear,
+    BinarySearch(Vec<CidWidthRange>),
+}
+
+fn build_cid_width_lookup(ranges: &[CidWidthRange]) -> CidWidthLookup {
+    if ranges.len() <= 1 {
+        return CidWidthLookup::Linear;
+    }
+
+    let mut sorted = ranges.to_vec();
+    sorted.sort_by_key(|range| range.start);
+
+    let mut has_overlap = false;
+    let mut prev_end = sorted[0].end;
+    for range in sorted.iter().skip(1) {
+        if range.start <= prev_end {
+            has_overlap = true;
+            break;
+        }
+        prev_end = range.end;
+    }
+
+    if has_overlap {
+        CidWidthLookup::Linear
+    } else {
+        CidWidthLookup::BinarySearch(sorted)
+    }
 }
 
 fn parse_cid_widths(arr: &[Object]) -> Vec<CidWidthRange> {
@@ -3915,7 +4921,11 @@ fn parse_cmap(data: &[u8]) -> CMap {
     CMap { codespaces, map }
 }
 
-fn parse_encoding(doc: &PdfDoc, obj: &Object) -> Option<EncodingMap> {
+fn parse_encoding(
+    doc: &PdfDoc,
+    obj: &Object,
+    decoded_stream_cache: &mut DecodedStreamCache,
+) -> Option<EncodingMap> {
     match doc.resolve(obj) {
         Object::Name(name) => {
             if name == "Identity-H" || name == "Identity-V" {
@@ -3931,7 +4941,7 @@ fn parse_encoding(doc: &PdfDoc, obj: &Object) -> Option<EncodingMap> {
             None
         }
         Object::Stream { .. } => {
-            let data = decode_stream(doc, obj)?;
+            let data = decoded_stream_cache.decode_stream(doc, obj)?;
             Some(parse_encoding_cmap(&data))
         }
         _ => None,
@@ -4234,12 +5244,12 @@ impl<'a> ContentTokenizer<'a> {
         }
     }
 
-    fn next_op_into(&mut self, operands: &mut Vec<Object>) -> Option<String> {
+    fn next_op_into(&mut self, operands: &mut Vec<Object>) -> Option<Keyword> {
         operands.clear();
         while let Some(tok) = self.lexer.next_token() {
             match tok {
                 Token::Keyword(op) => {
-                    if op == "BI" {
+                    if op == Keyword::OpBI {
                         self.skip_inline_image();
                         operands.clear();
                         continue;
@@ -4288,7 +5298,7 @@ impl<'a> ContentTokenizer<'a> {
     fn skip_inline_image(&mut self) {
         while let Some(tok) = self.lexer.next_token() {
             if let Token::Keyword(op) = tok
-                && op == "ID"
+                && op == Keyword::OpID
             {
                 self.lexer.skip_inline_image_data();
                 break;
@@ -4300,7 +5310,15 @@ impl<'a> ContentTokenizer<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parser::Parser;
     use std::io::Write;
+
+    fn parse_fixture_doc(path: &str) -> PdfDoc {
+        let lexer = Lexer::from_file(path).expect("expected fixture to load");
+        Parser::new(lexer)
+            .parse()
+            .expect("expected fixture to parse")
+    }
 
     #[test]
     fn canonical_base14_aliases_resolve() {
@@ -4408,6 +5426,83 @@ mod tests {
     }
 
     #[test]
+    fn cid_width_lookup_binary_search_matches_linear_when_ranges_do_not_overlap() {
+        let ranges = vec![
+            CidWidthRange {
+                start: 10,
+                end: 12,
+                width: 500,
+            },
+            CidWidthRange {
+                start: 20,
+                end: 25,
+                width: 700,
+            },
+        ];
+        let linear_font = FontMetrics {
+            first_char: 0,
+            widths: Vec::new(),
+            ascent: 800.0,
+            descent: -200.0,
+            units_to_text: 0.001,
+            to_unicode: None,
+            encoding: None,
+            single_byte_encoding: SingleByteEncoding::WinAnsi,
+            single_byte_overrides: HashMap::new(),
+            cid_widths: ranges.clone(),
+            cid_width_lookup: CidWidthLookup::Linear,
+            cid_default_width: 300,
+        };
+        let fast_font = FontMetrics {
+            cid_width_lookup: build_cid_width_lookup(&ranges),
+            ..linear_font.clone()
+        };
+
+        assert!(matches!(
+            fast_font.cid_width_lookup,
+            CidWidthLookup::BinarySearch(_)
+        ));
+        for code in [9u32, 10, 11, 12, 13, 20, 22, 25, 26] {
+            assert_eq!(fast_font.width_cid(code), linear_font.width_cid(code));
+        }
+    }
+
+    #[test]
+    fn cid_width_lookup_keeps_linear_first_match_when_ranges_overlap() {
+        let ranges = vec![
+            CidWidthRange {
+                start: 15,
+                end: 18,
+                width: 300,
+            },
+            CidWidthRange {
+                start: 10,
+                end: 20,
+                width: 500,
+            },
+        ];
+        let font = FontMetrics {
+            first_char: 0,
+            widths: Vec::new(),
+            ascent: 800.0,
+            descent: -200.0,
+            units_to_text: 0.001,
+            to_unicode: None,
+            encoding: None,
+            single_byte_encoding: SingleByteEncoding::WinAnsi,
+            single_byte_overrides: HashMap::new(),
+            cid_widths: ranges.clone(),
+            cid_width_lookup: build_cid_width_lookup(&ranges),
+            cid_default_width: 250,
+        };
+
+        assert!(matches!(font.cid_width_lookup, CidWidthLookup::Linear));
+        assert_eq!(font.width_cid(16), 300.0);
+        assert_eq!(font.width_cid(11), 500.0);
+        assert_eq!(font.width_cid(30), 250.0);
+    }
+
+    #[test]
     fn type0_descendant_font_dict_resolves_indirect_array() {
         let doc = PdfDoc {
             objects: HashMap::from([
@@ -4482,6 +5577,7 @@ mod tests {
             single_byte_encoding: SingleByteEncoding::WinAnsi,
             single_byte_overrides: HashMap::new(),
             cid_widths: Vec::new(),
+            cid_width_lookup: CidWidthLookup::Linear,
             cid_default_width: 1000,
         };
 
@@ -4519,7 +5615,7 @@ mod tests {
             bbox: make_rect(0.0, 0.0, 1.0, 1.0),
             bg_luminance: Some(0.0),
         }];
-        assert!(text_is_visible_at_bbox(&text_state, bbox, &fills));
+        assert!(text_is_visible_at_bbox(&text_state, bbox, &fills, None));
     }
 
     #[test]
@@ -4530,7 +5626,7 @@ mod tests {
             bbox: make_rect(0.0, 0.0, 1.0, 1.0),
             bg_luminance: Some(0.0),
         }];
-        assert!(text_is_visible_at_bbox(&text_state, bbox, &fills));
+        assert!(text_is_visible_at_bbox(&text_state, bbox, &fills, None));
     }
 
     #[test]
@@ -4541,7 +5637,7 @@ mod tests {
             bbox: make_rect(0.0, 0.0, 1.0, 1.0),
             bg_luminance: Some(0.99),
         }];
-        assert!(!text_is_visible_at_bbox(&text_state, bbox, &fills));
+        assert!(!text_is_visible_at_bbox(&text_state, bbox, &fills, None));
     }
 
     #[test]
@@ -4552,7 +5648,34 @@ mod tests {
             bbox: make_rect(0.0, 0.0, 1.0, 1.0),
             bg_luminance: None,
         }];
-        assert!(text_is_visible_at_bbox(&text_state, bbox, &fills));
+        assert!(text_is_visible_at_bbox(&text_state, bbox, &fills, None));
+    }
+
+    #[test]
+    fn clipped_glyph_fraction_filter_rejects_tiny_visible_sliver() {
+        let raw = make_rect(0.0, 0.0, 10.0, 10.0);
+        let visible = make_rect(0.0, 0.0, 10.0, 2.4);
+        assert!(!clipped_glyph_visibility_fraction_is_sufficient(
+            raw, visible, true, false
+        ));
+    }
+
+    #[test]
+    fn clipped_glyph_fraction_filter_keeps_visible_quarter_or_more() {
+        let raw = make_rect(0.0, 0.0, 10.0, 10.0);
+        let visible = make_rect(0.0, 0.0, 10.0, 2.5);
+        assert!(clipped_glyph_visibility_fraction_is_sufficient(
+            raw, visible, true, false
+        ));
+    }
+
+    #[test]
+    fn clipped_glyph_fraction_filter_is_bypassed_for_tagged_invisible_text() {
+        let raw = make_rect(0.0, 0.0, 10.0, 10.0);
+        let visible = make_rect(0.0, 0.0, 10.0, 1.0);
+        assert!(clipped_glyph_visibility_fraction_is_sufficient(
+            raw, visible, true, true
+        ));
     }
 
     #[test]
@@ -4563,7 +5686,7 @@ mod tests {
         let mut operands = Vec::new();
         let mut ops = Vec::new();
         while let Some(op) = tokenizer.next_op_into(&mut operands) {
-            ops.push(op);
+            ops.push(op.as_str().to_string());
         }
         assert_eq!(ops, vec!["BT", "Tf", "Tj", "ET"]);
     }
@@ -4575,9 +5698,57 @@ mod tests {
         let mut operands = Vec::new();
         let mut ops = Vec::new();
         while let Some(op) = tokenizer.next_op_into(&mut operands) {
-            ops.push(op);
+            ops.push(op.as_str().to_string());
         }
         assert_eq!(ops, vec!["Q", "BT", "Tf", "Tj", "ET"]);
+    }
+
+    #[test]
+    fn parallel_block_extraction_matches_serial_for_core_fixtures() {
+        let fixture_paths = [
+            "tests/pdfs/fw2.pdf",
+            "tests/pdfs/edge/edge_inline_image_payload_continuation.pdf",
+        ];
+        for path in fixture_paths {
+            let doc = parse_fixture_doc(path);
+            let pages = collect_pages(&doc);
+            let serial = extract_text_blocks_raw_serial_from_pages(&doc, &pages)
+                .into_iter()
+                .map(|block| (block.page_index, block.text, block.bbox))
+                .collect::<Vec<_>>();
+            let parallel = extract_text_blocks_raw_parallel_from_pages(&doc, &pages)
+                .into_iter()
+                .map(|block| (block.page_index, block.text, block.bbox))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                parallel, serial,
+                "parallel block extraction drifted for {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn parallel_char_extraction_matches_serial_for_core_fixtures() {
+        let fixture_paths = [
+            "tests/pdfs/fw2.pdf",
+            "tests/pdfs/edge/edge_inline_image_payload_continuation.pdf",
+        ];
+        for path in fixture_paths {
+            let doc = parse_fixture_doc(path);
+            let pages = collect_pages(&doc);
+            let serial = extract_char_bboxes_raw_serial_from_pages(&doc, &pages)
+                .into_iter()
+                .map(|ch| (ch.page_index, ch.ch, ch.bbox))
+                .collect::<Vec<_>>();
+            let parallel = extract_char_bboxes_raw_parallel_from_pages(&doc, &pages)
+                .into_iter()
+                .map(|ch| (ch.page_index, ch.ch, ch.bbox))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                parallel, serial,
+                "parallel char extraction drifted for {path}"
+            );
+        }
     }
 
     #[test]
@@ -4794,6 +5965,61 @@ mod tests {
             )
             .expect("max-iteration fallback should return smallest state");
         assert_eq!(expanded, base);
+    }
+
+    #[test]
+    fn expand_constrained_mixed_axes_selects_larger_area_from_dual_orders() {
+        let base = make_bbox_rect(10.0, 10.0, 20.0, 20.0);
+        let max_bounds = make_bbox_rect(0.0, 0.0, 100.0, 100.0);
+        let blockers = vec![
+            make_bbox_rect(0.0, 40.0, 24.0, 80.0),
+            make_bbox_rect(22.0, 30.0, 100.0, 80.0),
+            make_bbox_rect(60.0, 0.0, 100.0, 24.0),
+            make_bbox_rect(30.0, 26.0, 100.0, 100.0),
+        ];
+
+        let vertical_first = base
+            .expand_constrained_with_limit_for_order(
+                &blockers,
+                &[ExpandDirection::Right, ExpandDirection::Down],
+                &max_bounds,
+                256,
+                AxisPassOrder::VerticalThenHorizontal,
+            )
+            .expect("vertical-first solve should succeed");
+        let horizontal_first = base
+            .expand_constrained_with_limit_for_order(
+                &blockers,
+                &[ExpandDirection::Right, ExpandDirection::Down],
+                &max_bounds,
+                256,
+                AxisPassOrder::HorizontalThenVertical,
+            )
+            .expect("horizontal-first solve should succeed");
+
+        assert!(vertical_first.area() > horizontal_first.area());
+        let selected = base
+            .expand_constrained(
+                &blockers,
+                &[ExpandDirection::Right, ExpandDirection::Down],
+                &max_bounds,
+            )
+            .expect("dual-order solve should succeed");
+        assert_eq!(selected, vertical_first);
+    }
+
+    #[test]
+    fn expand_candidate_selection_tie_break_is_deterministic() {
+        let wide = make_bbox_rect(0.0, 0.0, 1.0, 4.0);
+        let tall = make_bbox_rect(0.0, 0.0, 4.0, 1.0);
+        assert_eq!(Rectangle::pick_larger_rect(wide, tall), wide);
+
+        let a = make_bbox_rect(0.0, 0.0, 2.0, 2.0);
+        let b = make_bbox_rect(0.0, 1.0, 2.0, 3.0);
+        assert_eq!(a.area(), b.area());
+        assert_eq!(a.width(), b.width());
+        assert_eq!(a.height(), b.height());
+        assert_eq!(Rectangle::pick_larger_rect(a, b), a);
     }
 
     #[test]

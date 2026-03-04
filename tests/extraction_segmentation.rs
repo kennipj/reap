@@ -1,5 +1,6 @@
 mod common;
 
+use std::collections::HashSet;
 use std::fs;
 
 use reap::model::Object;
@@ -130,6 +131,49 @@ fn header_phrase_reconstructs_from_words() {
 }
 
 #[test]
+fn overpaint_duplicate_labels_are_deduped_in_blocks() {
+    let blocks = load_words(&edge_pdf("edge_overpaint_duplicate_labels.pdf"));
+
+    let repeated_hits: Vec<_> = blocks
+        .iter()
+        .filter(|b| b.page_index == 0 && b.text == "OVERPAINT_LABEL")
+        .collect();
+    assert_eq!(
+        repeated_hits.len(),
+        1,
+        "expected exactly one OVERPAINT_LABEL token, got {}",
+        repeated_hits.len()
+    );
+
+    let unique_hits: Vec<_> = blocks
+        .iter()
+        .filter(|b| b.page_index == 0 && b.text == "UNIQUE_TOKEN")
+        .collect();
+    assert_eq!(
+        unique_hits.len(),
+        1,
+        "expected exactly one UNIQUE_TOKEN token, got {}",
+        unique_hits.len()
+    );
+
+    let rect_bits = |r: &Rectangle| {
+        let norm = |v: f64| if v == 0.0 { 0.0f64.to_bits() } else { v.to_bits() };
+        (norm(r.left), norm(r.top), norm(r.right), norm(r.bottom))
+    };
+    let mut seen = HashSet::new();
+    for b in &blocks {
+        let key = (b.page_index, b.text.clone(), rect_bits(&b.bbox));
+        assert!(
+            seen.insert(key),
+            "found duplicate block after dedupe: page={} text='{}' bbox={:?}",
+            b.page_index,
+            b.text,
+            b.bbox
+        );
+    }
+}
+
+#[test]
 fn id_and_number_are_not_merged() {
     let doc = load_doc(&edge_pdf("edge_spacing_and_regex_labels.pdf"));
     let blocks = extract_text_blocks(&doc);
@@ -239,6 +283,54 @@ fn white_deduction_codes_are_hidden_but_labels_remain_visible() {
             header
         );
     }
+}
+
+#[test]
+fn clipped_overlap_sliver_text_is_excluded_while_visible_labels_remain() {
+    let fixture = edge_pdf("edge_clipped_overlap_invisible_text.pdf");
+    let bytes = fs::read(&fixture).expect("failed to read clipped overlap fixture");
+    assert!(
+        bytes.windows(b"re W n".len()).any(|w| w == b"re W n"),
+        "expected clipping marker in fixture bytes"
+    );
+
+    let doc = load_doc(&fixture);
+    let blocks = extract_text_blocks(&doc);
+
+    for visible in ["ALPHA", "CORE", "BETA", "VISION"] {
+        assert!(
+            blocks
+                .iter()
+                .any(|b| b.page_index == 0 && b.text == visible),
+            "expected visible token to remain: {}",
+            visible
+        );
+    }
+
+    assert!(
+        blocks.iter().any(|b| {
+            b.page_index == 0 && b.text == "COVER" && (b.bbox.bottom - b.bbox.top) >= 5.0
+        }),
+        "expected at least one normal-height COVER token to remain visible"
+    );
+
+    for hidden in ["GHOST", "NOTE", "SHADOW"] {
+        assert!(
+            !blocks.iter().any(|b| b.page_index == 0 && b.text == hidden),
+            "expected clipped sliver token to be excluded: {}",
+            hidden
+        );
+    }
+
+    assert!(
+        !blocks.iter().any(|b| {
+            b.page_index == 0
+                && b.text == "COVER"
+                && b.bbox.left < 70.0
+                && (b.bbox.bottom - b.bbox.top) < 2.0
+        }),
+        "expected no tiny-height overlapping COVER sliver in the left overlap region"
+    );
 }
 
 #[test]
@@ -791,6 +883,150 @@ fn search_regex_line_builder_uses_directional_rtree_overlap() {
     assert!(
         !hits.is_empty(),
         "expected regex to still match across newline whitespace"
+    );
+}
+
+#[test]
+fn search_regex_line_builder_height_guard_separates_tall_and_normal_blocks() {
+    let blocks = vec![
+        TextBlock {
+            page_index: 0,
+            text: "BIG".to_string(),
+            bbox: Rectangle {
+                top: 10.0,
+                left: 10.0,
+                bottom: 30.0,
+                right: 24.0,
+            },
+        },
+        TextBlock {
+            page_index: 0,
+            text: "Alpha".to_string(),
+            bbox: Rectangle {
+                top: 10.5,
+                left: 72.0,
+                bottom: 17.0,
+                right: 88.0,
+            },
+        },
+        TextBlock {
+            page_index: 0,
+            text: "Delta".to_string(),
+            bbox: Rectangle {
+                top: 19.5,
+                left: 72.0,
+                bottom: 26.5,
+                right: 102.0,
+            },
+        },
+        TextBlock {
+            page_index: 0,
+            text: "Beta".to_string(),
+            bbox: Rectangle {
+                top: 10.5,
+                left: 90.0,
+                bottom: 17.0,
+                right: 100.0,
+            },
+        },
+        TextBlock {
+            page_index: 0,
+            text: "Gamma".to_string(),
+            bbox: Rectangle {
+                top: 10.5,
+                left: 102.0,
+                bottom: 17.0,
+                right: 112.0,
+            },
+        },
+        TextBlock {
+            page_index: 0,
+            text: "2028".to_string(),
+            bbox: Rectangle {
+                top: 10.5,
+                left: 30.0,
+                bottom: 30.5,
+                right: 48.0,
+            },
+        },
+    ];
+    let index = TextBlockIndex::new(blocks);
+    let full_text = index.text();
+    let lines: Vec<&str> = full_text.lines().collect();
+    assert_eq!(lines, vec!["BIG 2028", "Alpha Beta Gamma", "Delta"]);
+}
+
+#[test]
+fn search_regex_line_builder_height_guard_preserves_regex_across_newlines() {
+    let blocks = vec![
+        TextBlock {
+            page_index: 0,
+            text: "BIG".to_string(),
+            bbox: Rectangle {
+                top: 10.0,
+                left: 10.0,
+                bottom: 30.0,
+                right: 24.0,
+            },
+        },
+        TextBlock {
+            page_index: 0,
+            text: "Alpha".to_string(),
+            bbox: Rectangle {
+                top: 10.5,
+                left: 72.0,
+                bottom: 17.0,
+                right: 88.0,
+            },
+        },
+        TextBlock {
+            page_index: 0,
+            text: "Delta".to_string(),
+            bbox: Rectangle {
+                top: 19.5,
+                left: 72.0,
+                bottom: 26.5,
+                right: 102.0,
+            },
+        },
+        TextBlock {
+            page_index: 0,
+            text: "Beta".to_string(),
+            bbox: Rectangle {
+                top: 10.5,
+                left: 90.0,
+                bottom: 17.0,
+                right: 100.0,
+            },
+        },
+        TextBlock {
+            page_index: 0,
+            text: "Gamma".to_string(),
+            bbox: Rectangle {
+                top: 10.5,
+                left: 102.0,
+                bottom: 17.0,
+                right: 112.0,
+            },
+        },
+        TextBlock {
+            page_index: 0,
+            text: "2028".to_string(),
+            bbox: Rectangle {
+                top: 10.5,
+                left: 30.0,
+                bottom: 30.5,
+                right: 48.0,
+            },
+        },
+    ];
+    let mut index = TextBlockIndex::new(blocks);
+    let hits = index
+        .search_regex(r"BIG\s+2028\s+Alpha\s+Beta\s+Gamma\s+Delta")
+        .expect("regex should compile");
+    assert!(
+        !hits.is_empty(),
+        "expected regex to match across lines separated by newline whitespace"
     );
 }
 

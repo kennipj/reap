@@ -1,5 +1,6 @@
 mod common;
 
+use std::collections::HashSet;
 use std::fs;
 
 use reap::model::Object;
@@ -75,6 +76,64 @@ fn mac_roman_encoding_decodes_apostrophe_and_dash() {
     assert!(
         has_copy_b_line,
         "expected decoded Copy B line with em dash and apostrophe"
+    );
+}
+
+#[test]
+fn overpaint_duplicate_labels_are_deduped_in_chars() {
+    let doc = load_doc(&edge_pdf("edge_overpaint_duplicate_labels.pdf"));
+    let chars = extract_char_bboxes(&doc);
+    assert!(
+        !chars.is_empty(),
+        "expected non-empty chars for overpaint dedupe fixture"
+    );
+
+    let mut page0 = chars
+        .iter()
+        .filter(|c| c.page_index == 0)
+        .collect::<Vec<_>>();
+    assert!(
+        !page0.is_empty(),
+        "expected non-empty page-0 chars for overpaint dedupe fixture"
+    );
+
+    let rect_bits = |left: f64, top: f64, right: f64, bottom: f64| {
+        let norm = |v: f64| if v == 0.0 { 0.0f64.to_bits() } else { v.to_bits() };
+        (norm(left), norm(top), norm(right), norm(bottom))
+    };
+
+    let mut seen = HashSet::new();
+    for ch in &page0 {
+        let key = (
+            ch.page_index,
+            ch.ch,
+            rect_bits(ch.bbox.left, ch.bbox.top, ch.bbox.right, ch.bbox.bottom),
+        );
+        assert!(
+            seen.insert(key),
+            "found duplicate char after dedupe: page={} ch='{}' bbox={:?}",
+            ch.page_index,
+            ch.ch,
+            ch.bbox
+        );
+    }
+
+    page0.sort_by(|a, b| {
+        a.bbox
+            .top
+            .total_cmp(&b.bbox.top)
+            .then_with(|| a.bbox.left.total_cmp(&b.bbox.left))
+    });
+    let text: String = page0.iter().map(|c| c.ch).collect();
+    assert_eq!(
+        text,
+        "OVERPAINT_LABELUNIQUE_TOKEN",
+        "unexpected page-0 text sequence from overpaint dedupe fixture"
+    );
+    assert_eq!(
+        page0.len(),
+        "OVERPAINT_LABELUNIQUE_TOKEN".chars().count(),
+        "expected deduped page-0 char count to match token lengths"
     );
 }
 
