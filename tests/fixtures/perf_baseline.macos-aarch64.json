@@ -5,49 +5,49 @@
       "scenario_id": "parse",
       "dataset_id": "fw2",
       "stat": "median_ms",
-      "metric_ms": 6.421354000000001,
+      "metric_ms": 5.0243955,
       "threshold_class": "core"
     },
     {
       "scenario_id": "parse",
       "dataset_id": "edge_incremental_update_objstm",
       "stat": "median_ms",
-      "metric_ms": 0.0277705,
+      "metric_ms": 0.019459,
       "threshold_class": "core"
     },
     {
       "scenario_id": "extract_blocks",
       "dataset_id": "fw2",
       "stat": "median_ms",
-      "metric_ms": 3.3445419999999997,
+      "metric_ms": 1.0279375,
       "threshold_class": "core"
     },
     {
       "scenario_id": "extract_blocks",
       "dataset_id": "edge_incremental_update_objstm",
       "stat": "median_ms",
-      "metric_ms": 0.040417,
+      "metric_ms": 0.038584,
       "threshold_class": "core"
     },
     {
       "scenario_id": "index_build",
       "dataset_id": "fw2",
       "stat": "median_ms",
-      "metric_ms": 0.481833,
+      "metric_ms": 0.203708,
       "threshold_class": "core"
     },
     {
       "scenario_id": "search_cached",
       "dataset_id": "fw2",
       "stat": "median_ms",
-      "metric_ms": 0.003125,
+      "metric_ms": 0.003,
       "threshold_class": "cached"
     },
     {
       "scenario_id": "search_mixed",
       "dataset_id": "fw2",
       "stat": "p95_ms",
-      "metric_ms": 0.019917,
+      "metric_ms": 0.018625,
       "threshold_class": "mixed_scoped_encryption"
     },
     {
@@ -58,17 +58,24 @@
       "threshold_class": "cached"
     },
     {
+      "scenario_id": "split_cached",
+      "dataset_id": "fw2",
+      "stat": "median_ms",
+      "metric_ms": 0.24354199999999998,
+      "threshold_class": "mixed_scoped_encryption"
+    },
+    {
       "scenario_id": "scoped_merge_rules",
       "dataset_id": "fw2",
       "stat": "median_ms",
-      "metric_ms": 1.6580835,
+      "metric_ms": 1.5268540000000002,
       "threshold_class": "mixed_scoped_encryption"
     },
     {
       "scenario_id": "parse_encrypted_empty_password",
       "dataset_id": "edge_encrypted_empty_password",
       "stat": "median_ms",
-      "metric_ms": 0.040354,
+      "metric_ms": 0.038354,
       "threshold_class": "mixed_scoped_encryption"
     }
   ]

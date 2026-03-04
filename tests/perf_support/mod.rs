@@ -10,7 +10,10 @@ use std::time::Instant;
 
 use reap::parser::{ParseError, Parser, PdfDoc};
 use reap::rtree::{ScopedMergeRules, TextBlockIndex};
-use reap::text::{Rectangle, extract_char_bboxes, extract_text_blocks};
+use reap::text::{
+    Rectangle, extract_char_bboxes, extract_text_blocks,
+    extract_text_blocks_with_chars_with_parallel_mode,
+};
 use reap::tokenizer::Lexer;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -43,6 +46,7 @@ pub struct ScenarioConfig {
     pub search_cached: SearchCachedConfig,
     pub search_mixed: SearchMixedConfig,
     pub search_regex_cached: SearchRegexConfig,
+    pub split_cached: SplitConfig,
     pub scoped_merge_rules: ScopedMergeRulesConfig,
 }
 
@@ -74,6 +78,12 @@ pub struct SearchMixedConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct SearchRegexConfig {
+    pub dataset: String,
+    pub pattern: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SplitConfig {
     pub dataset: String,
     pub pattern: String,
 }
@@ -593,6 +603,17 @@ fn measure_search_regex_cached_median_ms(
     Ok(median(&mut samples))
 }
 
+fn measure_split_cached_median_ms(idx: &TextBlockIndex, pattern: &str) -> PerfResult<f64> {
+    let mut samples = timed_samples(SEARCH_WARMUP, SEARCH_ITERS, || {
+        let out = idx
+            .split(pattern)
+            .map_err(|err| format!("split failed for pattern {}: {:?}", pattern, err))?;
+        black_box(out.block_len());
+        Ok(())
+    })?;
+    Ok(median(&mut samples))
+}
+
 fn measure_scoped_merge_rules_median_ms(
     idx: &TextBlockIndex,
     cfg: &ScopedMergeRulesConfig,
@@ -750,6 +771,27 @@ pub fn run_committed_regression(corpus: &PerfCorpus) -> PerfResult<Vec<PerfMetri
         StatisticKind::MedianMs,
         measure_search_regex_cached_median_ms(&mut regex_idx, &regex_cfg.pattern)?,
         ThresholdClass::Cached,
+    ));
+
+    let split_cfg = &corpus.config.scenarios.split_cached;
+    if split_cfg.dataset != fw2.id {
+        return Err(format!(
+            "split_cached dataset mismatch: expected fw2, got {}",
+            split_cfg.dataset
+        ));
+    }
+    let (split_blocks, split_block_chars) =
+        extract_text_blocks_with_chars_with_parallel_mode(&fw2_doc, None);
+    if split_blocks.is_empty() {
+        return Err("fw2 extracted zero blocks for split_cached".to_string());
+    }
+    let split_idx = TextBlockIndex::new_with_chars(split_blocks, split_block_chars);
+    out.push(metric(
+        "split_cached",
+        &fw2.id,
+        StatisticKind::MedianMs,
+        measure_split_cached_median_ms(&split_idx, &split_cfg.pattern)?,
+        ThresholdClass::MixedScopedEncryption,
     ));
 
     let scoped_cfg = &corpus.config.scenarios.scoped_merge_rules;

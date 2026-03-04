@@ -157,7 +157,13 @@ fn overpaint_duplicate_labels_are_deduped_in_blocks() {
     );
 
     let rect_bits = |r: &Rectangle| {
-        let norm = |v: f64| if v == 0.0 { 0.0f64.to_bits() } else { v.to_bits() };
+        let norm = |v: f64| {
+            if v == 0.0 {
+                0.0f64.to_bits()
+            } else {
+                v.to_bits()
+            }
+        };
         (norm(r.left), norm(r.top), norm(r.right), norm(r.bottom))
     };
     let mut seen = HashSet::new();

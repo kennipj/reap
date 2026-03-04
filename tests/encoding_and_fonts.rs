@@ -98,7 +98,13 @@ fn overpaint_duplicate_labels_are_deduped_in_chars() {
     );
 
     let rect_bits = |left: f64, top: f64, right: f64, bottom: f64| {
-        let norm = |v: f64| if v == 0.0 { 0.0f64.to_bits() } else { v.to_bits() };
+        let norm = |v: f64| {
+            if v == 0.0 {
+                0.0f64.to_bits()
+            } else {
+                v.to_bits()
+            }
+        };
         (norm(left), norm(top), norm(right), norm(bottom))
     };
 
@@ -126,8 +132,7 @@ fn overpaint_duplicate_labels_are_deduped_in_chars() {
     });
     let text: String = page0.iter().map(|c| c.ch).collect();
     assert_eq!(
-        text,
-        "OVERPAINT_LABELUNIQUE_TOKEN",
+        text, "OVERPAINT_LABELUNIQUE_TOKEN",
         "unexpected page-0 text sequence from overpaint dedupe fixture"
     );
     assert_eq!(

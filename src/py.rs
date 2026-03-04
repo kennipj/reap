@@ -8,7 +8,9 @@ use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes, PyList, PyModule, PyType};
 
 use crate::parser::{ParseError, Parser};
-use crate::rtree::{RegexSearchError, ScopedMergeRules, TextBlockIndex as RsTextBlockIndex};
+use crate::rtree::{
+    RegexSearchError, ScopedMergeRules, SplitError, TextBlockIndex as RsTextBlockIndex,
+};
 use crate::text::{
     CharBBox, ExpandDirection, ExpandError, ExtractParallelMode, Rectangle as RsRectangle,
     extract_text_blocks_with_chars_and_page_rects_with_parallel_mode,
@@ -477,6 +479,27 @@ impl TextBlockIndex {
         let py_blocks = (0..scoped_inner.block_len()).map(|_| None).collect();
         Ok(Self {
             inner: RefCell::new(scoped_inner),
+            py_blocks: RefCell::new(py_blocks),
+            regex_py_cache: RefCell::new(HashMap::new()),
+        })
+    }
+
+    fn split(&self, _py: Python<'_>, pattern: &str) -> PyResult<Self> {
+        let split_inner = self
+            .inner
+            .borrow()
+            .split(pattern)
+            .map_err(|err| match err {
+                SplitError::InvalidPattern(e) => {
+                    pyo3::exceptions::PyValueError::new_err(format!("invalid regex pattern: {}", e))
+                }
+                SplitError::MissingBlockChars => pyo3::exceptions::PyValueError::new_err(
+                    "split requires per-block character bounding boxes",
+                ),
+            })?;
+        let py_blocks = (0..split_inner.block_len()).map(|_| None).collect();
+        Ok(Self {
+            inner: RefCell::new(split_inner),
             py_blocks: RefCell::new(py_blocks),
             regex_py_cache: RefCell::new(HashMap::new()),
         })
