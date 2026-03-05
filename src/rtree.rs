@@ -629,7 +629,7 @@ impl TextBlockIndex {
         Ok(out)
     }
 
-    pub fn split(&self, pattern: &str) -> Result<Self, SplitError> {
+    pub fn split(&self, pattern: &str, boundaries: Option<Rectangle>) -> Result<Self, SplitError> {
         let regex = compiled_regex(pattern).map_err(SplitError::InvalidPattern)?;
         let Some(block_chars) = self.block_chars.as_ref() else {
             return Err(SplitError::MissingBlockChars);
@@ -643,8 +643,22 @@ impl TextBlockIndex {
                 .get(index)
                 .map(Vec::as_slice)
                 .unwrap_or_default();
+
+            if let Some(b) = boundaries
+                && !block.bbox.overlaps(&b, 1.0)
+            {
+                if let (Some(blocks_out), Some(chars_out)) =
+                    (out_blocks.as_mut(), out_block_chars.as_mut())
+                {
+                    blocks_out.push(block.clone());
+                    chars_out.push(chars.to_vec());
+                }
+                continue;
+            };
+
             let maybe_match = regex
-                .find_iter(&block.text)
+                .captures_iter(&block.text)
+                .map(|cap| cap.get(1).or_else(|| cap.get(0)).unwrap())
                 .find(|mat| mat.start() < mat.end());
             let Some(mat) = maybe_match else {
                 if let (Some(blocks_out), Some(chars_out)) =
@@ -1926,7 +1940,7 @@ mod tests {
             make_char(0, 'o', 10.0, 36.0, 20.0, 38.0),
         ]];
         let index = TextBlockIndex::new_with_chars(blocks, block_chars);
-        let split = index.split("123").expect("split should succeed");
+        let split = index.split("123", None).expect("split should succeed");
         assert_eq!(split.block_len(), 3);
         assert_eq!(
             split.block_at(0).map(|block| block.text.as_str()),
@@ -1986,7 +2000,7 @@ mod tests {
             make_char(0, 'c', 10.0, 30.0, 20.0, 35.0),
         ]];
         let index = TextBlockIndex::new_with_chars(blocks, block_chars);
-        let split = index.split("1").expect("split should succeed");
+        let split = index.split("1", None).expect("split should succeed");
         assert_eq!(split.block_len(), 3);
         assert_eq!(
             split.block_at(0).map(|block| block.text.as_str()),
@@ -2036,7 +2050,7 @@ mod tests {
             ],
         ];
         let index = TextBlockIndex::new_with_chars(blocks, block_chars);
-        let split = index.split("123").expect("split should succeed");
+        let split = index.split("123", None).expect("split should succeed");
         let texts = (0..split.block_len())
             .filter_map(|i| split.block_at(i).map(|block| block.text.clone()))
             .collect::<Vec<String>>();
@@ -2079,7 +2093,7 @@ mod tests {
             Some("AB CD")
         );
 
-        let split = scoped.split("CD").expect("split should succeed");
+        let split = scoped.split("CD", None).expect("split should succeed");
         assert_eq!(split.block_len(), 2);
         assert_eq!(
             split.block_at(0).map(|block| block.text.as_str()),
@@ -2113,7 +2127,7 @@ mod tests {
     fn split_returns_error_when_block_chars_are_missing() {
         let index = TextBlockIndex::new(vec![make_block(0, "He123llo", 10.0, 10.0, 20.0, 38.0)]);
         let err = index
-            .split("123")
+            .split("123", None)
             .expect_err("split should fail without block chars");
         assert!(matches!(err, SplitError::MissingBlockChars));
     }
@@ -2133,9 +2147,94 @@ mod tests {
         ]];
         let index = TextBlockIndex::new_with_chars(blocks, block_chars);
         let err = index
-            .split("(")
+            .split("(", None)
             .expect_err("pattern should be reported as invalid");
         assert!(matches!(err, SplitError::InvalidPattern(_)));
+    }
+
+    #[test]
+    fn split_on_first_group() {
+        let blocks = vec![make_block(0, "1.026.500", 10.0, 10.0, 20.0, 38.0)];
+        let block_chars = vec![vec![
+            make_char(0, '1', 10.0, 10.0, 20.0, 14.0),
+            make_char(0, '.', 10.0, 14.0, 20.0, 18.0),
+            make_char(0, '0', 10.0, 18.0, 20.0, 22.0),
+            make_char(0, '2', 10.0, 22.0, 20.0, 26.0),
+            make_char(0, '6', 10.0, 26.0, 20.0, 30.0),
+            make_char(0, '.', 10.0, 30.0, 20.0, 34.0),
+            make_char(0, '5', 10.0, 34.0, 20.0, 36.0),
+            make_char(0, '0', 10.0, 36.0, 20.0, 38.0),
+            make_char(0, '0', 10.0, 38.0, 20.0, 40.0),
+        ]];
+        let index = TextBlockIndex::new_with_chars(blocks, block_chars);
+        let split = index
+            .split("(\\d\\.\\d)\\d+\\.\\d+", None)
+            .expect("split should succeed");
+        assert_eq!(split.block_len(), 2);
+        assert_eq!(
+            split.block_at(0).map(|block| block.text.as_str()),
+            Some("1.0")
+        );
+        assert_eq!(
+            split.block_at(1).map(|block| block.text.as_str()),
+            Some("26.500")
+        );
+    }
+
+    #[test]
+    fn split_with_boundaries() {
+        let blocks = vec![
+            make_block(0, "1.026.500", 10.0, 10.0, 20.0, 38.0),
+            make_block(0, "1.026.500", 50.0, 50.0, 60.0, 78.0),
+        ];
+        let block_chars = vec![
+            vec![
+                make_char(0, '1', 10.0, 10.0, 20.0, 14.0),
+                make_char(0, '.', 10.0, 14.0, 20.0, 18.0),
+                make_char(0, '0', 10.0, 18.0, 20.0, 22.0),
+                make_char(0, '2', 10.0, 22.0, 20.0, 26.0),
+                make_char(0, '6', 10.0, 26.0, 20.0, 30.0),
+                make_char(0, '.', 10.0, 30.0, 20.0, 34.0),
+                make_char(0, '5', 10.0, 34.0, 20.0, 36.0),
+                make_char(0, '0', 10.0, 36.0, 20.0, 38.0),
+                make_char(0, '0', 10.0, 38.0, 20.0, 40.0),
+            ],
+            vec![
+                make_char(0, '1', 50.0, 50.0, 60.0, 54.0),
+                make_char(0, '.', 50.0, 54.0, 60.0, 58.0),
+                make_char(0, '0', 50.0, 58.0, 60.0, 62.0),
+                make_char(0, '2', 50.0, 62.0, 60.0, 66.0),
+                make_char(0, '6', 50.0, 66.0, 60.0, 70.0),
+                make_char(0, '.', 50.0, 70.0, 60.0, 74.0),
+                make_char(0, '5', 50.0, 74.0, 60.0, 76.0),
+                make_char(0, '0', 50.0, 76.0, 60.0, 78.0),
+            ],
+        ];
+        let index = TextBlockIndex::new_with_chars(blocks, block_chars);
+        let split = index
+            .split(
+                "(\\d\\.\\d)\\d+\\.\\d+",
+                Some(Rectangle {
+                    top: 0.0,
+                    left: 0.0,
+                    bottom: 40.0,
+                    right: 40.0,
+                }),
+            )
+            .expect("split should succeed");
+        assert_eq!(split.block_len(), 3);
+        assert_eq!(
+            split.block_at(0).map(|block| block.text.as_str()),
+            Some("1.0")
+        );
+        assert_eq!(
+            split.block_at(1).map(|block| block.text.as_str()),
+            Some("26.500")
+        );
+        assert_eq!(
+            split.block_at(2).map(|block| block.text.as_str()),
+            Some("1.026.500")
+        );
     }
 
     #[test]

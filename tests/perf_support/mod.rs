@@ -606,7 +606,7 @@ fn measure_search_regex_cached_median_ms(
 fn measure_split_cached_median_ms(idx: &TextBlockIndex, pattern: &str) -> PerfResult<f64> {
     let mut samples = timed_samples(SEARCH_WARMUP, SEARCH_ITERS, || {
         let out = idx
-            .split(pattern)
+            .split(pattern, None)
             .map_err(|err| format!("split failed for pattern {}: {:?}", pattern, err))?;
         black_box(out.block_len());
         Ok(())
