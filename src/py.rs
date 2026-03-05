@@ -484,11 +484,21 @@ impl TextBlockIndex {
         })
     }
 
-    fn split(&self, _py: Python<'_>, pattern: &str) -> PyResult<Self> {
+    #[pyo3(signature = (
+        pattern,
+        boundaries=None
+    ))]
+    fn split(
+        &self,
+        _py: Python<'_>,
+        pattern: &str,
+        boundaries: Option<&Rectangle>,
+    ) -> PyResult<Self> {
+        let core_boundaries = boundaries.map(|b| b.as_core());
         let split_inner = self
             .inner
             .borrow()
-            .split(pattern)
+            .split(pattern, core_boundaries)
             .map_err(|err| match err {
                 SplitError::InvalidPattern(e) => {
                     pyo3::exceptions::PyValueError::new_err(format!("invalid regex pattern: {}", e))
